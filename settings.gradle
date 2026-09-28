@@ -1,0 +1,32 @@
+// NowWeather — 多版本 / 多加载器 Minecraft 天气同步模组
+// 结构：
+//   core/                    —— 与 Minecraft 完全解耦的纯 Java 核心（气候映射 / 预报 / API 客户端 / 同步策略）
+//   versions/forge-common/   —— 1.18.x Forge 各版本共享的胶水代码（源码目录被各版本工程引用）
+//   versions/forge-1.18.2/   —— 首要支持目标
+//   versions/forge-1.18.1/   —— 首要支持目标
+// 远期：versions/forge-1.19.2, versions/forge-1.20.1, versions/neoforge-1.21.x, versions/neoforge-26.x
+
+pluginManagement {
+    repositories {
+        // 国内镜像优先（Maven Central 直连约 0.8MB/s，腾讯云镜像约 14MB/s）；
+        // 找不到的构件 Gradle 会自动继续往后找，所以 Forge 专属包仍能落到官方源。
+        maven { name = 'TencentMirror'; url = 'https://mirrors.cloud.tencent.com/nexus/repository/maven-public/' }
+        maven { name = 'AliyunPublic'; url = 'https://maven.aliyun.com/repository/public/' }
+        gradlePluginPortal()
+        maven { name = 'MinecraftForge'; url = 'https://maven.minecraftforge.net/' }
+        maven { name = 'SpongePowered'; url = 'https://repo.spongepowered.org/repository/maven-public/' }
+        maven { name = 'Mojang Libraries'; url = 'https://libraries.minecraft.net/' }
+        mavenCentral()
+    }
+}
+
+rootProject.name = 'NowWeather'
+
+// core 可独立编译、独立自测（无 Minecraft 依赖）
+include 'core'
+// 各游戏版本目标；versions/forge-common 的源码由这些工程直接引用，不是一个独立子工程
+include 'forge-1.18.2'
+include 'forge-1.18.1'
+
+project(':forge-1.18.2').projectDir = file('versions/forge-1.18.2')
+project(':forge-1.18.1').projectDir = file('versions/forge-1.18.1')

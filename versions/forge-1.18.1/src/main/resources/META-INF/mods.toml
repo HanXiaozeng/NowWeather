@@ -1,0 +1,51 @@
+modLoader = "javafml"
+loaderVersion = "[39,)"
+license = "Apache-2.0"
+issueTrackerURL = "https://github.com/NowWeather/NowWeather/issues"
+
+[[mods]]
+modId = "nowweather"
+version = "${version}"
+displayName = "NowWeather"
+authors = "Cluda"
+description = '''
+用真实天气驱动 Minecraft：把你所在地区的实时天气搬进游戏里。
+
+- 通过 彩云天气 / Open-Meteo / UApiPro 获取所在地区的实时天气（坐标 / 城市名 / 行政区划代码 / IP 定位）
+- 每个生物群系都配置了「正常温度范围」与「可能出现的天气」，
+  预报系统据此判定气象数据是否合理，越界的天气会被修正而不是硬灌进世界
+- 内置生物群系气候映射：原版 1.18 基线 + 1.19~26.x 新增
+  + 超多生物群系(Biomes O' Plenty) + Terralith + Tectonic，未知群系按关键词与原版温度自动推断
+- 全部界面文本支持中英双语，跟随 Minecraft 客户端语言设置
+- 游戏内一天 = 真实 24 小时（按真实时区对齐，昼夜与实际同步）
+- 完全离线也能用：本地缓存 + 轻量推算（含距海岸距离修正的季节模型），并如实标注可信度
+- 下界 / 末地 / 虚空完全保持原版，任何情况下都不会被改写
+- 提供 WeatherProvider / WeatherBinding / ClimateResolver / ClimateModifier 四组扩展接口，
+  可与其它天气模组双向联动
+'''
+
+# 注意：这里**没有** [[mixins]] 段，这是刻意的。
+# 1.18.x 的 FML 不解析 mods.toml 里的 [[mixins]] 键（在 forge 39.1.2 的
+# fmlcore / fmlloader / javafmllanguage 字节码里搜不到 "mixins" 这个字符串），
+# 写了也不生效。1.18.x 声明 Mixin 配置的正确位置是 JAR 清单的 MixinConfigs 属性，
+# 见 versions/forge-1.18.1/build.gradle 的 jar { manifest { ... } }。
+
+[[dependencies.nowweather]]
+modId = "forge"
+mandatory = true
+versionRange = "[39,)"
+ordering = "NONE"
+side = "BOTH"
+
+[[dependencies.nowweather]]
+modId = "minecraft"
+mandatory = true
+versionRange = "[1.18.1,1.18.2)"
+ordering = "NONE"
+side = "BOTH"
+
+# 说明：超多生物群系（Biomes O' Plenty）等群系模组**不需要**在这里声明依赖。
+# 本模组对它们的支持是「数据驱动」的：内置一份群系气候表（data/nowweather/climate/*.json），
+# 运行时按群系 id / 标签 / 名称关键词 / 原版基础温度推断，不依赖对方的 API。
+# 反过来，声明可选依赖还会带来风险 —— BOP 的版本号形如 1.18.1-15.0.0.105，
+# 用 [14,) 这类范围去比较会被判成「不满足」，导致整个模组拒绝加载。

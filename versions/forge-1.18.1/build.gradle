@@ -1,0 +1,111 @@
+// NowWeather for Minecraft 1.18.1 (Forge 39.x)
+// 与 1.18.2 共用 versions/forge-common 下的全部胶水代码。
+
+buildscript {
+    repositories {
+        maven { name = 'TencentMirror'; url = 'https://mirrors.cloud.tencent.com/nexus/repository/maven-public/' }
+        maven { name = 'AliyunPublic'; url = 'https://maven.aliyun.com/repository/public/' }
+        maven { name = 'MinecraftForge'; url = 'https://maven.minecraftforge.net/' }
+        maven { name = 'SpongePowered'; url = 'https://repo.spongepowered.org/repository/maven-public/' }
+        mavenCentral()
+    }
+    dependencies {
+        classpath group: 'net.minecraftforge.gradle', name: 'ForgeGradle', version: '5.1.+', changing: true
+    }
+}
+
+apply plugin: 'net.minecraftforge.gradle'
+apply plugin: 'java'
+
+version = rootProject.findProperty('mod_version') ?: '26b39i'
+group = 'com.nowweather'
+archivesBaseName = 'NowWeather-1.18.1'
+
+sourceSets {
+    main {
+        java.srcDirs = [
+                'src/main/java',
+                '../forge-common/src/main/java',
+                '../../core/src/main/java'
+        ]
+        resources.srcDirs = [
+                'src/main/resources',
+                '../forge-common/src/main/resources',
+                '../../core/src/main/resources'
+        ]
+    }
+}
+
+minecraft {
+    mappings channel: 'official', version: '1.18.1'
+
+    runs {
+        client {
+            workingDirectory project.file('run')
+            property 'forge.logging.console.level', 'info'
+            mods {
+                NowWeather {
+                    source sourceSets.main
+                }
+            }
+        }
+        server {
+            workingDirectory project.file('run-server')
+            property 'forge.logging.console.level', 'info'
+            args '--nogui'
+            mods {
+                NowWeather {
+                    source sourceSets.main
+                }
+            }
+        }
+    }
+}
+
+repositories {
+    maven { name = 'TencentMirror'; url = 'https://mirrors.cloud.tencent.com/nexus/repository/maven-public/' }
+    maven { name = 'AliyunPublic'; url = 'https://maven.aliyun.com/repository/public/' }
+    maven { name = 'MinecraftForge'; url = 'https://maven.minecraftforge.net/' }
+    maven { name = 'Mojang Libraries'; url = 'https://libraries.minecraft.net/' }
+    mavenCentral()
+}
+
+dependencies {
+    minecraft "net.minecraftforge:forge:1.18.1-39.1.2"
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release = 17
+}
+
+processResources {
+    // 生成器的输入文件（原版群系事实快照）只用于构建期生成数据，不该进 jar。
+    // 注意用通配符：文件名带版本号后缀（_vanilla_source_1.18.2.json），
+    // 以前写成固定名导致这条 exclude 实际不生效，文件被原样打进了 jar。
+    exclude 'data/nowweather/climate/_vanilla_source*.json'
+
+    inputs.property 'version', project.version
+    filesMatching('META-INF/mods.toml') {
+        expand 'version': project.version
+    }
+}
+
+jar {
+    manifest {
+        attributes([
+                'Specification-Title'   : 'NowWeather',
+                'Specification-Vendor'  : 'Cluda',
+                'Specification-Version' : '1',
+                'Implementation-Title'  : project.name,
+                'Implementation-Version': project.version,
+                'Implementation-Vendor' : 'Cluda',
+                // ★ 1.18.x 声明 Mixin 配置的唯一正确位置就是这里（JAR 清单属性）。
+                //   mods.toml 的 [[mixins]] 段是更晚版本 Forge 的写法，1.18.1 的 FML
+                //   里连 "mixins" 这个字符串都不存在 —— 写了也完全不解析。
+                //   本项之前一直缺失，导致 nowweather.mixins.json 从未被加载、
+                //   ReverbParamsMixin 是死代码。
+                'MixinConfigs'          : 'nowweather.mixins.json'
+        ])
+    }
+}

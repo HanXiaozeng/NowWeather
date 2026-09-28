@@ -1,0 +1,42 @@
+# Gradle
+.gradle/
+build/
+out/
+!gradle/wrapper/gradle-wrapper.jar
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.settings/
+.classpath
+.project
+run/
+runs/
+# 端到端自测用的本地服务端（含第三方 mod jar 与 server.properties 里的 rcon 口令）
+run-server/
+
+# OS
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# 本地构建脚本产物
+tools/out/
+tools/logs/
+
+# 构建日志（本地排查用，不入库）
+build.log
+*.build.log
+
+# 启动器 / 个人的本地文件（不属于模组交付物）
+launcher_profiles.json
+PCL.ini
+PCL/
+
+# 调研子代理的临时资料区（体积大、非交付物；需要时删掉即可）
+_research/
+_research_tmp2/
+_scratch/

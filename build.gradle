@@ -1,0 +1,14 @@
+// NowWeather 根工程
+// 只做全局约定，具体构建逻辑放在各子工程里。
+
+allprojects {
+    group = 'com.nowweather'
+    version = rootProject.findProperty('mod_version') ?: '26b39i'
+}
+
+subprojects {
+    tasks.withType(JavaCompile).configureEach {
+        options.encoding = 'UTF-8'
+        options.release = 17
+    }
+}

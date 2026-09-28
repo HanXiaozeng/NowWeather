@@ -1,0 +1,25 @@
+用UApiPro获取当前地区天气，联动其他天气模组，在mc展现真实天气。
+https://uapis.cn/docs/api-reference/get-misc-weather
+（API Key 不写在这里：填到配置项 [api] apiKey，或用 /nowweather config set api.apiKey <key>）
+
+Call: NowWeather
+https://www.mcmod.cn/class/26161.html
+
+生物群系与气候映射
+
+预报系统依赖每个生物群系配置好的“正常温度范围”,来进行判断生成的气象数据是否合理。
+
+Project Atmosphere已经为很多流行的生物群系模组做了兼容:
+
+·超多生物群系;
+. Still Life;
+·悠然一派;
+· 群峦传说:次世代;
+. Terralith;
+·自然之灵;
+·未至之地;
+·我们走过的生物群系;
+· Galosphere;
+· 那不勒斯风味;
+·动态联合/集成动力;
+·秋原。

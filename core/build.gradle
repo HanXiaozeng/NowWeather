@@ -1,0 +1,59 @@
+// NowWeather Core —— 纯 Java 库，零 Minecraft 依赖。
+// 设计目标：可以在没有 Minecraft / Forge 的环境下独立编译、独立单元测试。
+// 任何 Minecraft 概念（ServerLevel、Biome、World 时钟……）都必须通过接口注入。
+
+plugins {
+    id 'java-library'
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+    withSourcesJar()
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release = 17
+    // 严格警告，保持核心干净
+    options.compilerArgs << '-Xlint:all' << '-Xlint:-serial' << '-Xlint:-processing'
+}
+
+// 核心模块不引入任何第三方依赖：JSON 解析、HTTP、日志全部自带实现，
+// 这样它既能被任意加载器复用，也能被离线测试。
+dependencies {
+}
+
+// 核心模块自带一个零依赖的测试运行器（见 src/test/java/com/nowweather/core/test/CoreSelfTest.java）。
+// 不引入 JUnit，保证「无网络也能验证核心逻辑」。
+sourceSets {
+    selfTest {
+        java.srcDir 'src/test/java'
+        compileClasspath += sourceSets.main.output
+        runtimeClasspath += sourceSets.main.output
+    }
+}
+
+tasks.register('coreSelfTest', JavaExec) {
+    group = 'verification'
+    description = '运行 NowWeather 核心的自带测试（不需要网络、不需要 Minecraft）'
+    classpath = sourceSets.selfTest.runtimeClasspath
+    mainClass = 'com.nowweather.core.test.CoreSelfTest'
+    // 必须用仓库根目录作为工作目录：部分测试要读
+    // docs/research/continentality-calibration.csv（46 站标定表）做交叉验证。
+    workingDir = rootProject.projectDir
+    // 控制台按 UTF-8 输出，否则中文断言名在 Windows 上会乱码
+    jvmArgs = ['-Dfile.encoding=UTF-8', '-Dstdout.encoding=UTF-8', '-Dstderr.encoding=UTF-8']
+}
+
+tasks.register('coreSelfTestJar', Jar) {
+    group = 'verification'
+    description = '把核心自测打包成可直接 java -jar 运行的工具'
+    dependsOn tasks.named('selfTestClasses')
+    archiveClassifier = 'selftest'
+    from sourceSets.selfTest.output
+    from sourceSets.main.output
+    manifest {
+        attributes 'Main-Class': 'com.nowweather.core.test.CoreSelfTest'
+    }
+}

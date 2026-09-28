@@ -1,0 +1,12 @@
+{
+  "required": false,
+  "minVersion": "0.8",
+  "package": "com.nowweather.forge.mixin",
+  "compatibilityLevel": "JAVA_17",
+  "client": [
+    "ReverbParamsMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 0
+  }
+}
