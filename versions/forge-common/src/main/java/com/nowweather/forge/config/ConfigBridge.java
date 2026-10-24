@@ -236,6 +236,17 @@ public final class ConfigBridge {
         return ForgeConfig.COMMON.llmWeatherDaily.get();
     }
 
+    /**
+     * 是否允许「自动 AI 辅助」：真实观测缺失或不可信时，服务器自己去问一次模型。
+     *
+     * <p>它不是一个独立的开关在管整条链：真正能不能调用还要看 {@link #llmEnabled()}、
+     * {@link #llmWeatherDaily()}、每个档位的 {@code dailyCalls} 与今日余量
+     * （见 {@code com.nowweather.forge.llm.AutoAssist}）。</p>
+     */
+    public static boolean llmAutoAssist() {
+        return ForgeConfig.COMMON.llmAutoAssist.get();
+    }
+
     public static boolean llmAllowConfigEdits() {
         return ForgeConfig.COMMON.llmAllowConfigEdits.get();
     }

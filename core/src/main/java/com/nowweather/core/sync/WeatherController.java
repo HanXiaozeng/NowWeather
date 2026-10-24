@@ -1210,6 +1210,29 @@ public final class WeatherController {
         nextFetchAllowedAt = Long.MAX_VALUE;
     }
 
+    /**
+     * 应用一条「辅助推算」得到的观测（AI 生成），但<b>不</b>进入手动覆盖模式：
+     * 下一次真实取数成功时照样会被替换掉。
+     *
+     * <h2>为什么不能直接用 {@link #applyManualObservation}</h2>
+     * <p>{@code applyManualObservation} 的语义是「玩家说了算」：它会把 {@code manualOverride}
+     * 打开，并把 {@code nextFetchAllowedAt} 推到 {@code Long.MAX_VALUE} —— 也就是说
+     * <b>自动同步被彻底停掉了</b>（只有 {@code /nowweather auto} 才能恢复）。
+     * 对 AI 辅助来说这是完全相反的意图：它是在真实数据暂时缺失时<b>垫一层</b>，
+     * 一旦真实取数恢复，就应该立刻被真实观测盖掉。如果误用手动入口，
+     * 玩家会看到「AI 的影子一直在，真实天气再也回不来」这种像是数据源坏了的怪现象。</p>
+     *
+     * <p>所以这里只做 {@code observation.set(...)}：不改 {@code manualOverride}、
+     * 不动取数节奏，纯粹替换当前观测这一格。传 {@code null} 时什么都不做
+     * （宁可保持旧数据，也不要让面板突然变成「没有数据」）。</p>
+     */
+    public void applyAssistedObservation(WeatherObservation assisted) {
+        if (assisted == null) {
+            return;
+        }
+        observation.set(assisted);
+    }
+
     public void clearManualOverride() {
         manualOverride = false;
         nextFetchAllowedAt = 0L;
@@ -1389,6 +1412,11 @@ public final class WeatherController {
                 sb.append(Text.tr("nowweather.status.offline_note",
                         fetchNote().isEmpty() ? Text.tr("nowweather.status.trying") : fetchNote()))
                         .append('\n');
+            } else if (com.nowweather.core.llm.WeatherAssistant.ASSIST_PROVIDER_ID.equals(obs.providerId())) {
+                // AI 辅助观测：必须显眼地说清「这条不是真实数据」，否则玩家会把模型的估计当真天气，
+                // 真实取数恢复后天气突然变化就会被当成 bug。
+                sb.append(Text.tr("nowweather.status.assist_note",
+                        Text.tr("nowweather.provider.llm"))).append('\n');
             }
         }
 

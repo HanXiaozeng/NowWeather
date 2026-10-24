@@ -4,6 +4,7 @@ import com.nowweather.core.http.HttpException;
 import com.nowweather.core.http.HttpRequestSpec;
 import com.nowweather.core.http.HttpResult;
 import com.nowweather.core.http.HttpTransport;
+import com.nowweather.core.llm.AutoAssistSchedule;
 import com.nowweather.core.llm.DailyCallQuota;
 import com.nowweather.core.llm.LlmClient;
 import com.nowweather.core.llm.LlmTiers;
@@ -54,6 +55,9 @@ final class LlmTests {
 
         T.section("自然语言改配置：白名单是硬约束");
         intent();
+
+        T.section("自动 AI 辅助：节奏、触发条件、建议→观测");
+        autoAssist();
     }
 
     /** 把一段「模型回复正文」包装成 OpenAI 兼容的响应体。 */
@@ -438,5 +442,118 @@ final class LlmTests {
         // 空输入与空白名单
         T.check("空输入被拒绝", !assistant.parseIntent(options(), "  ", allowed).success());
         T.check("空白名单被拒绝", !assistant.parseIntent(options(), "改点东西", List.of()).success());
+    }
+
+    /**
+     * 自动 AI 辅助：三件纯计算的事。
+     *
+     * <ol>
+     *   <li><b>节奏</b>（{@link AutoAssistSchedule#intervalMinutes}）：额度即节奏，
+     *       1440 ÷ 每日次数，下限 1 分钟；</li>
+     *   <li><b>到没到点</b>（{@link AutoAssistSchedule#isDue}）：从未试过立刻算到点，
+     *       刚好等于间隔也算；</li>
+     *   <li><b>要不要辅助</b>（{@link AutoAssistSchedule#needsAssist}）与
+     *       <b>建议→观测</b>（{@link WeatherAssistant#toObservation}）。</li>
+     * </ol>
+     *
+     * <p>这些是「自动辅助会不会乱花钱」的全部判据，所以全部做成纯函数在这里单测；
+     * 「读控制器 / 起线程」那部分（Forge 侧的 {@code AutoAssist}）不在 core 里，也不该在这里测。</p>
+     */
+    private static void autoAssist() {
+        // ---- ① 额度即节奏
+        T.eq("dailyCalls=144 → 每 10 分钟检查一次", 10, AutoAssistSchedule.intervalMinutes(144));
+        T.eq("dailyCalls=24 → 每小时一次", 60, AutoAssistSchedule.intervalMinutes(24));
+        T.eq("dailyCalls=2 → 每 12 小时一次", 720, AutoAssistSchedule.intervalMinutes(2));
+        T.eq("dailyCalls=1 → 每天一次", 1440, AutoAssistSchedule.intervalMinutes(1));
+        T.eq("★ dailyCalls=1000 → 下限 1 分钟（不会退化成每 tick 都问）",
+                1, AutoAssistSchedule.intervalMinutes(1000));
+        T.eq("dailyCalls=0（非法值）按每天一次保守处理", 1440, AutoAssistSchedule.intervalMinutes(0));
+        T.eq("间隔毫秒与分钟一致", 600_000L, AutoAssistSchedule.intervalMillis(144));
+
+        // ---- ② 到没到点
+        long now = 1_790_500_000_000L;
+        T.check("从未试过（0）→ 立刻到点", AutoAssistSchedule.isDue(0L, now, 10));
+        T.check("从未试过（负数）→ 也立刻到点", AutoAssistSchedule.isDue(-1L, now, 10));
+        T.check("刚试过 → 没到点", !AutoAssistSchedule.isDue(now - 1000L, now, 10));
+        T.check("差 1 毫秒 → 没到点", !AutoAssistSchedule.isDue(now - 599_999L, now, 10));
+        T.check("★ 刚好到间隔 → 到点（>= 而不是 >）", AutoAssistSchedule.isDue(now - 600_000L, now, 10));
+        T.check("超过间隔 → 到点", AutoAssistSchedule.isDue(now - 20L * 60_000L, now, 10));
+        T.check("★ 系统时间被改回去（差值负数）→ 不触发，不会变成每刻都问",
+                !AutoAssistSchedule.isDue(now + 3_600_000L, now, 10));
+
+        // ---- ③ 要不要辅助：四种「不可信」都要触发，新鲜真实数据不要
+        long staleAfter = 30L * 60_000L;
+        T.check("没有观测 → 需要辅助", AutoAssistSchedule.needsAssist(null, staleAfter, now));
+        T.check("★ 新鲜的真实观测 → 不需要辅助（这是「不费钱」的关键）",
+                !AutoAssistSchedule.needsAssist(observation("uapipro", now, false), staleAfter, now));
+        T.check("观测被标记为过期 → 需要辅助",
+                AutoAssistSchedule.needsAssist(observation("uapipro", now, true), staleAfter, now));
+        T.check("观测比过期阈值还旧 → 需要辅助",
+                AutoAssistSchedule.needsAssist(observation("uapipro", now - 40L * 60_000L, false),
+                        staleAfter, now));
+        T.check("刚好等于过期阈值 → 仍算新鲜（isOlderThan 是 >）",
+                !AutoAssistSchedule.needsAssist(observation("uapipro", now - staleAfter, false),
+                        staleAfter, now));
+        T.check("★ 当前是离线推算 → 需要辅助（离线推算不是真实数据）",
+                AutoAssistSchedule.needsAssist(
+                        observation(com.nowweather.core.sync.WeatherController.OFFLINE_PROVIDER_ID, now, false),
+                        staleAfter, now));
+
+        // ---- ④ 建议 → 观测
+        WeatherAssistant.WeatherSuggestion ok = new WeatherAssistant.WeatherSuggestion(
+                true, 22.5D, 65.0D, 3, "RAIN", 0.7D, "梅雨季节偏高", "");
+        T.check("providerId 常量就是 llm", "llm".equals(WeatherAssistant.ASSIST_PROVIDER_ID));
+        com.nowweather.core.weather.WeatherObservation assisted =
+                WeatherAssistant.toObservation(ok, now, OFFSET_SECONDS);
+        T.check("能转换出观测", assisted != null);
+        if (assisted != null) {
+            T.eq("来源标记为 AI 辅助", WeatherAssistant.ASSIST_PROVIDER_ID, assisted.providerId());
+            T.eq("天气类型", com.nowweather.core.weather.WeatherType.RAIN, assisted.weatherType());
+            T.near("温度", 22.5D, assisted.temperatureC(), 1.0E-9D);
+            T.near("湿度", 65.0D, assisted.humidityPercent(), 1.0E-9D);
+            T.eq("风力", 3, assisted.windScale());
+            T.near("置信度", 0.7D, assisted.confidence(), 1.0E-9D);
+            T.eq("观测时间 = 传入的 now", now, assisted.observedAtEpochMillis());
+            T.eq("取数时间 = 传入的 now", now, assisted.fetchedAtEpochMillis());
+            T.eq("时区偏移原样带过来", OFFSET_SECONDS, assisted.utcOffsetSeconds());
+            T.check("★ stale=false（它是刚算出来的估计，不是旧数据）", !assisted.stale());
+            T.check("conditionText 标注了 AI 辅助",
+                    assisted.conditionText().contains("AI 辅助"));
+            T.check("reportTimeText 标注了 AI 辅助",
+                    assisted.reportTimeText().contains("AI 辅助"));
+        }
+
+        // 湿度缺失（NaN）→ 保留 -1「未知」，不能被写成 0%
+        WeatherAssistant.WeatherSuggestion noHumidity = new WeatherAssistant.WeatherSuggestion(
+                true, 10.0D, Double.NaN, -1, "SNOW", 0.5D, "", "");
+        com.nowweather.core.weather.WeatherObservation dry =
+                WeatherAssistant.toObservation(noHumidity, now, OFFSET_SECONDS);
+        T.check("湿度未知时保留「未知」（-1）而不是 0",
+                dry != null && dry.humidityPercent() < 0.0D);
+
+        // weather 乱写 → 返回 null（调用方放弃应用），绝不用 UNKNOWN 兜底覆盖现有天气
+        WeatherAssistant.WeatherSuggestion gibberish = new WeatherAssistant.WeatherSuggestion(
+                true, 20.0D, 50.0D, 2, "龙卷风夹冰雹", 0.5D, "", "");
+        T.check("★ weather 解析不出来 → 返回 null（不覆盖现有观测）",
+                WeatherAssistant.toObservation(gibberish, now, OFFSET_SECONDS) == null);
+        T.check("失败的建议 → 返回 null",
+                WeatherAssistant.toObservation(
+                        WeatherAssistant.WeatherSuggestion.failure("没额度"), now, OFFSET_SECONDS) == null);
+        T.check("null 建议 → 返回 null（不抛异常）",
+                WeatherAssistant.toObservation(null, now, OFFSET_SECONDS) == null);
+    }
+
+    /** 造一条观测：{@code provider} 来源、{@code fetchedAt} 时间、是否过期。 */
+    private static com.nowweather.core.weather.WeatherObservation observation(
+            String provider, long fetchedAt, boolean stale) {
+        return com.nowweather.core.weather.WeatherObservation.builder(provider)
+                .weatherType(com.nowweather.core.weather.WeatherType.CLEAR)
+                .temperatureC(20.0D)
+                .humidityPercent(50.0D)
+                .windScale(2)
+                .fetchedAt(fetchedAt)
+                .observedAt(fetchedAt)
+                .stale(stale)
+                .build();
     }
 }

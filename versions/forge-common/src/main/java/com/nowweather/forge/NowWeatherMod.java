@@ -178,6 +178,8 @@ public final class NowWeatherMod {
 
         NowWeatherLog.LOGGER.info("NowWeather 已启动：{}", describeLocation(config));
         yieldAnnounced = false;
+        // 新世界/新服：自动辅助的节奏从头算起（否则会沿用上一个世界的「刚试过了」）
+        com.nowweather.forge.llm.AutoAssist.reset();
     }
 
     @SubscribeEvent
@@ -220,6 +222,9 @@ public final class NowWeatherMod {
         current.tick(context);
         maybeSyncToClients(server, current, context);
         driveWeather2(server, current, context);
+        // 自动 AI 辅助：真实天气缺失/不可信时自己问一次模型。
+        // 它内部只做「纯判断 + 起一个守护线程」，绝不会在 tick 线程上等网络。
+        com.nowweather.forge.llm.AutoAssist.maybeRun(current, server);
     }
 
     /**

@@ -251,6 +251,9 @@
   "nowweather.observation.cached": { "zh": "（缓存数据）", "en": " (cached data)" },
   "nowweather.observation.unknown_time": { "zh": "未知", "en": "Unknown" },
 
+  "nowweather.assist.condition": { "zh": "%s（AI 辅助推算）", "en": "%s (AI-assisted estimate)" },
+  "nowweather.assist.report_time": { "zh": "AI 辅助推算", "en": "AI-assisted estimate" },
+
   "nowweather.list.separator_semicolon": { "zh": "；", "en": "; " },
 
   "nowweather.announce.entered": { "zh": "§b[NowWeather] §f已进入 §e%s§7，§f%s §7| §f%s §7| §aNowWeather 已自动调整参数。", "en": "§b[NowWeather] §fEntered §e%s§7, §f%s §7| §f%s §7| §aNowWeather adjusted its settings automatically." },
@@ -301,5 +304,7 @@
   "nowweather.provider.openmeteo": { "zh": "Open-Meteo（全球）", "en": "Open-Meteo (global)" },
   "nowweather.provider.uapipro": { "zh": "UApiPro 实时天气", "en": "UApiPro Current Weather" },
   "nowweather.provider.static": { "zh": "固定天气（测试用）", "en": "Static Weather (for testing)" },
-  "nowweather.provider.static_forced": { "zh": "固定天气（强制）", "en": "Static Weather (forced)" }
+  "nowweather.provider.static_forced": { "zh": "固定天气（强制）", "en": "Static Weather (forced)" },
+  "nowweather.provider.llm": { "zh": "AI 辅助推算（LLM）", "en": "AI-assisted estimate (LLM)" },
+  "nowweather.status.assist_note": { "zh": "§e★ 当前天气由 %s 得到（不是真实数据）。真实取数一旦恢复就会被替换", "en": "§e★ The current weather is a %s, not real data. It is replaced as soon as real data returns" }
 }

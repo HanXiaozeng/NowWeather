@@ -248,6 +248,7 @@ public final class ForgeConfig {
         public final ForgeConfigSpec.IntValue llmTimeoutSeconds;
         public final ForgeConfigSpec.IntValue llmDailyCalls;
         public final ForgeConfigSpec.BooleanValue llmWeatherDaily;
+        public final ForgeConfigSpec.BooleanValue llmAutoAssist;
         public final ForgeConfigSpec.BooleanValue llmAllowConfigEdits;
 
         // LLM 副模型（主模型不可用时的回落档位）
@@ -554,6 +555,15 @@ public final class ForgeConfig {
                             "关掉之后 /nowweather forecast ai 直接不可用；",
                             "真正限制「一天能问几次」的是上面每个档位的 dailyCalls。")
                     .define("weatherDaily", true);
+            llmAutoAssist = b.comment("是否让 AI <b>自动</b>补上缺失的天气（默认关）。",
+                            "打开后：真实天气取不到（没数据 / 已过期 / 当前是离线推算）时，",
+                            "服务器会自己问一次模型，把结果当成「辅助推算」垫上去 —— 真实数据一恢复就被替换掉，",
+                            "不会像 /nowweather set 那样停掉自动同步。",
+                            "★ 检查节奏由上面的 dailyCalls 决定（额度即节奏）：一天 1440 分钟 ÷ 每天次数 = 每几分钟看一次，",
+                            "  例如主模型 dailyCalls=144 → 每 10 分钟检查一次；=24 → 每小时一次；=1 → 每天一次。",
+                            "检查不等于调用：只有在「当前观测缺失或不可信」且「玩家没有手动设过天气」时才真的花一次配额，",
+                            "所以每天真正花掉的钱不会超过这两个档位的 dailyCalls 之和。")
+                    .define("autoAssist", false);
             llmAllowConfigEdits = b.comment("允许 /nowweather ask 通过自然语言改配置。",
                             "只能改白名单内、且通过同一套范围校验的配置项。")
                     .define("allowConfigEdits", true);

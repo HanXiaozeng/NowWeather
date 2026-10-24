@@ -76,6 +76,16 @@ public final class WeatherAssistant {
             5. 用户可能会问「现在是多少」这类问题：这时请依据给出的「当前配置」如实回答，
                changes 留空，把答案写在 reply 里。绝对不要编造配置值。""";
 
+    /**
+     * 「AI 辅助推算」这条观测的 {@code providerId}。
+     *
+     * <p>之所以放在 core 的常量里（而不是 Forge 侧随手写字符串），是因为它有三个消费方：
+     * <b>自动辅助</b>写观测时、<b>状态面板</b>判断「当前这条是不是 AI 辅助的」、
+     * 以及<b>离线推算</b>的兄弟常量 {@code WeatherController.OFFLINE_PROVIDER_ID} 同一个用法。
+     * 三处各写一遍 "llm" 迟早会出现「一处改了、另一处没改」的静默失效。</p>
+     */
+    public static final String ASSIST_PROVIDER_ID = "llm";
+
     private final LlmClient client;
     private final SyncLogger logger;
 
@@ -154,6 +164,67 @@ public final class WeatherAssistant {
         } catch (RuntimeException e) {
             return WeatherSuggestion.failure("字段解析失败：" + e.getMessage());
         }
+    }
+
+    /**
+     * 把一条「AI 天气建议」转成可以直接交给控制器 / HUD / 状态面板的观测。
+     *
+     * <h2>为什么需要它（而不是各处自己 new 一遍）</h2>
+     * <p>建议（{@link WeatherSuggestion}）是「模型说了什么」，观测（{@code WeatherObservation}）
+     * 是「系统现在认为天气是什么」。两者之间有几个必须统一的口径，散落在调用点迟早写歪：
+     * </p>
+     * <ul>
+     *   <li>{@code providerId} 一律是 {@link #ASSIST_PROVIDER_ID}（"llm"）—— 这是下游判断
+     *       「这条数据能不能当真」的唯一依据；</li>
+     *   <li>{@code stale = false}：它不是「旧数据」，而是「刚刚算出来的估计」；</li>
+     *   <li>时间戳用<b>当前时刻</b>（{@code nowMillis}），而不是「上一次真实观测的时间」——
+     *       否则一条辅助观测会立刻被判定为「过期」，触发条件反而永远成立；</li>
+     *   <li>{@code conditionText / reportTimeText} 明确标注「AI 辅助」，让玩家一眼看出
+     *       这不是数据源给的实况（走 {@code Text.tr}，键在 {@code frag-core.json}）。</li>
+     * </ul>
+     *
+     * <h2>什么时候返回 null</h2>
+     * <p>返回 null 表示「这条建议不能变成天气」，调用方应放弃应用并记一行日志：</p>
+     * <ul>
+     *   <li>{@code suggestion} 本身是失败的；</li>
+     *   <li>{@code weather()} 是模型乱写的（{@link WeatherType#parse} 解析不出来）。
+     *       这里<b>不</b>用 {@code WeatherType.UNKNOWN} 兜底：一条「不知道什么天气」
+     *       的观测覆盖掉现有数据，只会让画面从「有天气」变成「没天气」，比不覆盖更糟。</li>
+     * </ul>
+     *
+     * @param suggestion      AI 给出的建议
+     * @param nowMillis       当前时刻（epoch 毫秒），同时用作 observedAt 与 fetchedAt
+     * @param utcOffsetSeconds 观测地点的 UTC 偏移（秒），原样带进观测
+     */
+    public static com.nowweather.core.weather.WeatherObservation toObservation(
+            WeatherSuggestion suggestion, long nowMillis, int utcOffsetSeconds) {
+        if (suggestion == null || !suggestion.success()) {
+            return null;
+        }
+        com.nowweather.core.weather.WeatherType type =
+                com.nowweather.core.weather.WeatherType.parse(suggestion.weather(), null);
+        if (type == null) {
+            return null;
+        }
+        com.nowweather.core.weather.WeatherObservation.Builder builder =
+                com.nowweather.core.weather.WeatherObservation.builder(ASSIST_PROVIDER_ID)
+                        .weatherType(type)
+                        .conditionText(com.nowweather.core.text.Text.tr(
+                                "nowweather.assist.condition", type.zhName()))
+                        .temperatureC(suggestion.temperatureC())
+                        .windScale(suggestion.windScale())
+                        .confidence(suggestion.confidence())
+                        .reportTimeText(com.nowweather.core.text.Text.tr("nowweather.assist.report_time"))
+                        .observedAt(nowMillis)
+                        .fetchedAt(nowMillis)
+                        .stale(false)
+                        .utcOffsetSeconds(utcOffsetSeconds);
+        // 湿度缺失时保留 builder 的 -1（「未知」），不要写成 NaN 或 0：
+        // 0% 是一个合法但极端的读数，会和「没给」混为一谈。
+        if (Double.isFinite(suggestion.humidityPercent())) {
+            builder.humidityPercent(suggestion.humidityPercent());
+        }
+        return builder.build();
     }
 
     /**

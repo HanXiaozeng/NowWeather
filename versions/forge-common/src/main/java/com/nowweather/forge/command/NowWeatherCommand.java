@@ -482,48 +482,34 @@ public final class NowWeatherCommand {
      * <p>文件名沿用旧的 {@code llm.json}（删掉它仍然等于「重置配额」），但结构已升级成
      * 主 / 副两个档位各记一笔 + 一个本地日键，见 {@link com.nowweather.core.llm.DailyCallQuota}。
      * 旧结构（只有 {@code weatherCallAt}）仍能读，读取时按「主模型今天已用 1 次」处理。</p>
+     *
+     * <p>实际实现已经搬到 {@link com.nowweather.forge.llm.LlmQuotaStore}：
+     * 自动 AI 辅助（{@code AutoAssist}）必须和命令用<b>同一个文件、同一把锁</b>，
+     * 否则两条路径各自记账会变成「额度明明还有 / 额度突然没了」。</p>
      */
     private static java.nio.file.Path llmStateFile() {
-        return net.minecraftforge.fml.loading.FMLPaths.GAMEDIR.get()
-                .resolve("weather").resolve("nowweather").resolve("llm.json");
+        return com.nowweather.forge.llm.LlmQuotaStore.stateFile();
     }
 
     /**
-     * 配额账本的串行化锁。
+     * 配额账本的串行化锁（与自动 AI 辅助共用同一把）。
      *
      * <p>「读账本 → 判断还有没有额度 → 扣减 → 写回」这四步必须成组完成，
      * 否则两个几乎同时发出的请求会各自认为「还有额度」，于是超花一次钱。
      * 付出的代价是 AI 请求彼此排队（最长一个超时时间），但这是异步线程，
      * 不占服务器主线程，而且这类请求本来一分钟也不会发两次。</p>
      */
-    private static final Object LLM_STATE_LOCK = new Object();
+    private static final Object LLM_STATE_LOCK = com.nowweather.forge.llm.LlmQuotaStore.LOCK;
 
     /** 读配额账本（含旧结构兼容）。读不到 / 解析失败一律当空账本 —— 状态坏了不该让 AI 功能不可用。 */
     private static com.nowweather.core.llm.DailyCallQuota.Usage loadLlmUsage(long nowMillis,
                                                                            int utcOffsetSeconds) {
-        try {
-            java.nio.file.Path path = llmStateFile();
-            if (!java.nio.file.Files.isRegularFile(path)) {
-                return com.nowweather.core.llm.DailyCallQuota.Usage.EMPTY;
-            }
-            String text = java.nio.file.Files.readString(path, java.nio.charset.StandardCharsets.UTF_8);
-            return com.nowweather.core.llm.DailyCallQuota.parse(text, nowMillis, utcOffsetSeconds);
-        } catch (Exception e) {
-            return com.nowweather.core.llm.DailyCallQuota.Usage.EMPTY;
-        }
+        return com.nowweather.forge.llm.LlmQuotaStore.load(nowMillis, utcOffsetSeconds);
     }
 
     private static void saveLlmUsage(com.nowweather.core.llm.DailyCallQuota.Usage usage) {
-        try {
-            java.nio.file.Path path = llmStateFile();
-            java.nio.file.Files.createDirectories(path.getParent());
-            java.nio.file.Files.writeString(path,
-                    com.nowweather.core.llm.DailyCallQuota.toJson(usage),
-                    java.nio.charset.StandardCharsets.UTF_8);
-        } catch (Exception e) {
-            // 写不进去只影响「下次还能不能调」，不影响这次已经拿到的结果 —— 不能因此让命令失败
-            NowWeatherLog.LOGGER.warn("写入 LLM 配额状态失败（不影响本次调用）: {}", e.getMessage());
-        }
+        // 写不进去只影响「下次还能不能调」，不影响这次已经拿到的结果 —— 不能因此让命令失败
+        com.nowweather.forge.llm.LlmQuotaStore.save(usage);
     }
 
     /**

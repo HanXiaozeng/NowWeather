@@ -653,6 +653,7 @@ public final class ConfigEntries {
         add(list, Section.LLM, "llm.timeoutSeconds", c.llmTimeoutSeconds, 3, 300);
         add(list, Section.LLM, "llm.dailyCalls", c.llmDailyCalls, 1, 1000);
         add(list, Section.LLM, "llm.weatherDaily", c.llmWeatherDaily, false);
+        add(list, Section.LLM, "llm.autoAssist", c.llmAutoAssist, false);
         add(list, Section.LLM, "llm.allowConfigEdits", c.llmAllowConfigEdits, false);
 
         add(list, Section.LLM, "llm.secondary.enabled", c.llmSecondaryEnabled, false);
