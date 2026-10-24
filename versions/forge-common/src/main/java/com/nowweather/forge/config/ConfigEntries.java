@@ -651,7 +651,7 @@ public final class ConfigEntries {
         add(list, Section.LLM, "llm.maxTokens", c.llmMaxTokens, 64, 8192);
         add(list, Section.LLM, "llm.temperature", c.llmTemperature, 0.0D, 2.0D);
         add(list, Section.LLM, "llm.timeoutSeconds", c.llmTimeoutSeconds, 3, 300);
-        add(list, Section.LLM, "llm.dailyCalls", c.llmDailyCalls, 1, 100);
+        add(list, Section.LLM, "llm.dailyCalls", c.llmDailyCalls, 1, 1000);
         add(list, Section.LLM, "llm.weatherDaily", c.llmWeatherDaily, false);
         add(list, Section.LLM, "llm.allowConfigEdits", c.llmAllowConfigEdits, false);
 
@@ -663,7 +663,7 @@ public final class ConfigEntries {
         add(list, Section.LLM, "llm.secondary.maxTokens", c.llmSecondaryMaxTokens, 64, 8192);
         add(list, Section.LLM, "llm.secondary.temperature", c.llmSecondaryTemperature, 0.0D, 2.0D);
         add(list, Section.LLM, "llm.secondary.timeoutSeconds", c.llmSecondaryTimeoutSeconds, 3, 300);
-        add(list, Section.LLM, "llm.secondary.dailyCalls", c.llmSecondaryDailyCalls, 1, 100);
+        add(list, Section.LLM, "llm.secondary.dailyCalls", c.llmSecondaryDailyCalls, 1, 1000);
 
         // ---- 调试
         add(list, Section.DEBUG, "debug.logProviderDiagnostics", c.logProviderDiagnostics, false);

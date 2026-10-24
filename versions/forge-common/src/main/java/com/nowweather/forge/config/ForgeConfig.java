@@ -544,10 +544,12 @@ public final class ForgeConfig {
                             "以前这个值是写死 30 秒的常量，慢模型（本地大模型、冷启动、思考模式）",
                             "经常在 30 秒整被掐断，日志里只留一句「请求超时」。现在可以按端点调。")
                     .defineInRange("timeoutSeconds", 30, 3, 300);
-            llmDailyCalls = b.comment("主模型每天最多调用几次（1~100，默认 1）。",
+            llmDailyCalls = b.comment("主模型每天最多调用几次（1~1000，默认 1）。",
                             "只约束 /nowweather forecast ai；/nowweather config ask 不占用配额。",
-                            "按<b>本地日</b>重置（用所在地时区算的日界，不是「距上次 24 小时」）。")
-                    .defineInRange("dailyCalls", 1, 1, 100);
+                            "按<b>本地日</b>重置（用所在地时区算的日界，不是「距上次 24 小时」）。",
+                            "★ 这个数字也可以直接当成「节奏」来填：一天 1440 分钟，",
+                            "  想每 10 分钟一次就填 144，想每小时一次就填 24，想每半天一次就填 2。")
+                    .defineInRange("dailyCalls", 1, 1, 1000);
             llmWeatherDaily = b.comment("是否启用 AI 辅助天气（总开关）。",
                             "关掉之后 /nowweather forecast ai 直接不可用；",
                             "真正限制「一天能问几次」的是上面每个档位的 dailyCalls。")
@@ -581,10 +583,11 @@ public final class ForgeConfig {
             llmSecondaryTimeoutSeconds = b.comment("副模型单次请求超时（秒，3~300，默认 30）。",
                             "本地部署的小模型往往比云端慢，回落到这一档时可以把超时调大一些。")
                     .defineInRange("timeoutSeconds", 30, 3, 300);
-            llmSecondaryDailyCalls = b.comment("副模型每天最多调用几次（1~100，默认 2）。",
+            llmSecondaryDailyCalls = b.comment("副模型每天最多调用几次（1~1000，默认 2）。",
                             "★ 只统计<b>副模型真的被调用</b>的次数：主模型成功时副模型一次都不算。",
-                            "默认给 2 次，是因为它本来就是「主模型偶尔不可用」时的兜底。")
-                    .defineInRange("dailyCalls", 2, 1, 100);
+                            "默认给 2 次，是因为它本来就是「主模型偶尔不可用」时的兜底；",
+                            "「每半天一次」也是填 2（一天 1440 分钟 ÷ 2 = 每 12 小时）。")
+                    .defineInRange("dailyCalls", 2, 1, 1000);
             b.pop();
             b.pop();
 

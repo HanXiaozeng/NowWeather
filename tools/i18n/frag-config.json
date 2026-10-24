@@ -142,7 +142,7 @@
   "nowweather.config.entry.llm_timeoutseconds.label": { "zh": "主模型超时（秒）", "en": "Primary timeout (seconds)" },
   "nowweather.config.entry.llm_timeoutseconds.hint": { "zh": "范围 3~300，默认 30。以前这个值是写死的 30 秒常量：本地大模型、冷启动、思考模式经常刚好在 30 秒被掐断，日志里只剩一句「请求超时」。慢模型请调大", "en": "Range 3–300, default 30. This used to be a hard-coded 30-second constant, so slow local models, cold starts and thinking mode were cut off right at 30 seconds with only a \"request timed out\" line in the log. Raise it for slow models" },
   "nowweather.config.entry.llm_dailycalls.label": { "zh": "主模型每日调用次数", "en": "Primary calls per day" },
-  "nowweather.config.entry.llm_dailycalls.hint": { "zh": "范围 1~100，默认 1。只约束 /nowweather forecast ai（config ask 不占配额）。按<b>本地日</b>重置：过了所在地的午夜就归零，而不是「距上次 24 小时」", "en": "Range 1–100, default 1. Only limits /nowweather forecast ai (config ask does not consume quota). Resets by <b>local day</b>: it rolls over at local midnight rather than 24 hours after the last call" },
+  "nowweather.config.entry.llm_dailycalls.hint": { "zh": "范围 1~1000，默认 1。只约束 /nowweather forecast ai（config ask 不占配额）。按<b>本地日</b>重置：过了所在地的午夜就归零，而不是「距上次 24 小时」。★ 这个数字也可以直接当节奏用：一天 1440 分钟，每 10 分钟一次就填 144，每小时一次填 24，每半天一次填 2", "en": "Range 1–1000, default 1. Only limits /nowweather forecast ai (config ask does not consume quota). Resets by <b>local day</b>: it rolls over at local midnight rather than 24 hours after the last call" },
   "nowweather.config.entry.llm_weatherdaily.label": { "zh": "启用 AI 辅助天气", "en": "Enable AI weather" },
   "nowweather.config.entry.llm_weatherdaily.hint": { "zh": "AI 天气功能的总开关（默认开）。关掉后 /nowweather forecast ai 直接不可用；真正限制「一天能问几次」的是每个档位各自的「每日调用次数」", "en": "Master switch for AI weather (on by default). When off, /nowweather forecast ai is unavailable; how many times a day you may ask is controlled by each tier's own calls-per-day setting" },
   "nowweather.config.entry.llm_allowconfigedits.label": { "zh": "允许自然语言改配置", "en": "Allow natural-language config edits" },
@@ -165,7 +165,7 @@
   "nowweather.config.entry.llm_secondary_timeoutseconds.label": { "zh": "副模型超时（秒）", "en": "Secondary timeout (seconds)" },
   "nowweather.config.entry.llm_secondary_timeoutseconds.hint": { "zh": "范围 3~300，默认 30。本地部署的小模型往往比云端慢，回落到这一档时可以把超时调大", "en": "Range 3–300, default 30. Small local models are often slower than a cloud API, so raising this timeout is reasonable for a fallback tier" },
   "nowweather.config.entry.llm_secondary_dailycalls.label": { "zh": "副模型每日调用次数", "en": "Secondary calls per day" },
-  "nowweather.config.entry.llm_secondary_dailycalls.hint": { "zh": "范围 1~100，默认 2。★ 只统计副模型<b>真的被调用</b>的次数：主模型成功时副模型一次都不算。它本来就是「主模型偶尔不可用」的兜底，所以默认给了 2 次", "en": "Range 1–100, default 2. ★ Only calls that actually reach the secondary model are counted — nothing is charged when the primary succeeds. It exists to cover the occasional primary outage, hence the default of 2" },
+  "nowweather.config.entry.llm_secondary_dailycalls.hint": { "zh": "范围 1~1000，默认 2。★ 只统计副模型<b>真的被调用</b>的次数：主模型成功时副模型一次都不算。它本来就是「主模型偶尔不可用」的兜底。想让它「每半天一次」就填 2（1440 ÷ 2 = 每 12 小时）", "en": "Range 1–1000, default 2. ★ Only calls that actually reach the secondary model are counted — nothing is charged when the primary succeeds. It exists to cover the occasional primary outage, hence the default of 2" },
 
   "nowweather.config.entry.debug_logproviderdiagnostics.label": { "zh": "打印数据源细节", "en": "Log provider details" },
   "nowweather.config.entry.debug_logproviderdiagnostics.hint": { "zh": "排查「为什么拿不到天气」时打开", "en": "Turn this on when diagnosing why no weather is coming through" },

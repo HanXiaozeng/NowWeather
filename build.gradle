@@ -3,7 +3,7 @@
 
 allprojects {
     group = 'com.nowweather'
-    version = rootProject.findProperty('mod_version') ?: '26b39j'
+    version = rootProject.findProperty('mod_version') ?: '26b43a'
 }
 
 subprojects {
