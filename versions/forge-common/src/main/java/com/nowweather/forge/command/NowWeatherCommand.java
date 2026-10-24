@@ -476,39 +476,155 @@ public final class NowWeatherCommand {
 
     // ------------------------------------------------------------------ LLM 与联动诊断
 
-    /** LLM 配置的状态文件：只记「上次调用时间」，用来实现每天一次的硬预算。 */
+    /**
+     * LLM 配额账本文件。
+     *
+     * <p>文件名沿用旧的 {@code llm.json}（删掉它仍然等于「重置配额」），但结构已升级成
+     * 主 / 副两个档位各记一笔 + 一个本地日键，见 {@link com.nowweather.core.llm.DailyCallQuota}。
+     * 旧结构（只有 {@code weatherCallAt}）仍能读，读取时按「主模型今天已用 1 次」处理。</p>
+     */
     private static java.nio.file.Path llmStateFile() {
         return net.minecraftforge.fml.loading.FMLPaths.GAMEDIR.get()
                 .resolve("weather").resolve("nowweather").resolve("llm.json");
     }
 
-    private static long lastLlmCallEpochMillis() {
+    /**
+     * 配额账本的串行化锁。
+     *
+     * <p>「读账本 → 判断还有没有额度 → 扣减 → 写回」这四步必须成组完成，
+     * 否则两个几乎同时发出的请求会各自认为「还有额度」，于是超花一次钱。
+     * 付出的代价是 AI 请求彼此排队（最长一个超时时间），但这是异步线程，
+     * 不占服务器主线程，而且这类请求本来一分钟也不会发两次。</p>
+     */
+    private static final Object LLM_STATE_LOCK = new Object();
+
+    /** 读配额账本（含旧结构兼容）。读不到 / 解析失败一律当空账本 —— 状态坏了不该让 AI 功能不可用。 */
+    private static com.nowweather.core.llm.DailyCallQuota.Usage loadLlmUsage(long nowMillis,
+                                                                           int utcOffsetSeconds) {
         try {
             java.nio.file.Path path = llmStateFile();
             if (!java.nio.file.Files.isRegularFile(path)) {
-                return 0L;
+                return com.nowweather.core.llm.DailyCallQuota.Usage.EMPTY;
             }
-            com.nowweather.core.json.JsonObject json = com.nowweather.core.json.JsonValue
-                    .parse(java.nio.file.Files.readString(path, java.nio.charset.StandardCharsets.UTF_8))
-                    .asObjectOrNull();
-            return json == null ? 0L : json.optLong("weatherCallAt", 0L);
+            String text = java.nio.file.Files.readString(path, java.nio.charset.StandardCharsets.UTF_8);
+            return com.nowweather.core.llm.DailyCallQuota.parse(text, nowMillis, utcOffsetSeconds);
         } catch (Exception e) {
-            return 0L;
+            return com.nowweather.core.llm.DailyCallQuota.Usage.EMPTY;
         }
     }
 
-    private static void recordLlmCall(long epochMillis) {
+    private static void saveLlmUsage(com.nowweather.core.llm.DailyCallQuota.Usage usage) {
         try {
             java.nio.file.Path path = llmStateFile();
             java.nio.file.Files.createDirectories(path.getParent());
-            com.nowweather.core.json.JsonObject json = new com.nowweather.core.json.JsonObject();
-            json.put("weatherCallAt", epochMillis);
-            json.put("note", "AI 辅助天气推算每天最多一次；这个文件只是成本计数，删掉就会重置预算");
-            java.nio.file.Files.writeString(path, json.toPrettyJson(),
+            java.nio.file.Files.writeString(path,
+                    com.nowweather.core.llm.DailyCallQuota.toJson(usage),
                     java.nio.charset.StandardCharsets.UTF_8);
         } catch (Exception e) {
-            NowWeatherLog.LOGGER.warn("写入 LLM 状态失败（不影响功能）: {}", e.getMessage());
+            // 写不进去只影响「下次还能不能调」，不影响这次已经拿到的结果 —— 不能因此让命令失败
+            NowWeatherLog.LOGGER.warn("写入 LLM 配额状态失败（不影响本次调用）: {}", e.getMessage());
         }
+    }
+
+    /**
+     * 当前所在地的 UTC 偏移（秒）。
+     *
+     * <p>日界必须按玩家所在地算：东八区玩家的「今天」与 UTC 的「今天」差 8 小时，
+     * 用错时区就会出现「明明已经跨天，配额却还没重置」这种看不懂的现象。
+     * 天气系统还没初始化时退化成 UTC（0），绝不抛异常。</p>
+     */
+    private static int llmUtcOffsetSeconds(CommandSourceStack source) {
+        try {
+            NowWeatherRuntime runtime = NowWeatherMod.runtime();
+            if (runtime != null) {
+                return runtime.controller().timeZoneService().effectiveOffsetSeconds();
+            }
+        } catch (RuntimeException e) {
+            // 时区服务取不到就用 UTC，不影响功能
+        }
+        return 0;
+    }
+
+    /**
+     * 一次「主 → 副」调用期间的配额会话。
+     *
+     * <p>它同时是回落链的 {@link com.nowweather.core.llm.LlmTiers.QuotaGate}（只看不扣）
+     * 与记账者（{@link #account}）：这样「判断有没有额度」和「扣了多少」用的是同一份快照，
+     * 差值不会算错。调用方负责持 {@link #LLM_STATE_LOCK}。</p>
+     */
+    private static final class QuotaSession implements com.nowweather.core.llm.LlmTiers.QuotaGate {
+
+        private final long nowMillis;
+        private final int utcOffsetSeconds;
+        private com.nowweather.core.llm.DailyCallQuota.Usage usage;
+
+        QuotaSession(long nowMillis, int utcOffsetSeconds) {
+            this.nowMillis = nowMillis;
+            this.utcOffsetSeconds = utcOffsetSeconds;
+            this.usage = loadLlmUsage(nowMillis, utcOffsetSeconds);
+        }
+
+        @Override
+        public boolean available(boolean secondary, int dailyCalls) {
+            return com.nowweather.core.llm.DailyCallQuota.available(
+                    usage, secondary, dailyCalls, nowMillis, utcOffsetSeconds);
+        }
+
+        /**
+         * 按回落结果记账。
+         *
+         * <p><b>只有真正成功的那一次才扣配额。</b>失败（Key 写错、网络不通、服务端 4xx/5xx）不扣 ——
+         * 否则「Key 配错一次」当天额度就没了，玩家只能等明天或手动删账本；
+         * 而这类失败本来也基本不产生费用，扣了反而挡住真正的调用。</p>
+         *
+         * <p>没有发出请求的档位（未配置 / 未启用 / 配额已满）自然也不扣。</p>
+         */
+        void account(com.nowweather.core.llm.LlmTiers.Outcome outcome) {
+            boolean changed = false;
+            if (outcome.primary() != null && outcome.primary().succeeded()) {
+                usage = com.nowweather.core.llm.DailyCallQuota.consume(usage, false, nowMillis, utcOffsetSeconds);
+                changed = true;
+            }
+            if (outcome.secondary() != null && outcome.secondary().succeeded()) {
+                usage = com.nowweather.core.llm.DailyCallQuota.consume(usage, true, nowMillis, utcOffsetSeconds);
+                changed = true;
+            }
+            if (changed) {
+                saveLlmUsage(usage);
+            }
+        }
+    }
+
+    /** 「%s：%s」里的一档，例如「主模型：今日配额已用完」。 */
+    private static String describeTierStatus(com.nowweather.core.llm.LlmTiers.Attempt attempt,
+                                             boolean secondary) {
+        String tier = Text.tr(secondary
+                ? "nowweather.command.llm.tier.secondary"
+                : "nowweather.command.llm.tier.primary");
+        String reason = switch (attempt.status()) {
+            case SKIPPED_QUOTA -> Text.tr("nowweather.command.llm.reason.quota_used");
+            case SKIPPED_NOT_CONFIGURED -> Text.tr("nowweather.command.llm.reason.not_configured");
+            case SKIPPED_DISABLED -> Text.tr("nowweather.command.llm.reason.not_enabled");
+            case FAILED -> Text.tr("nowweather.command.llm.reason.failed", attempt.error());
+            case SUCCEEDED -> Text.tr("nowweather.command.llm.reason.ok");
+        };
+        return Text.tr("nowweather.command.llm.tier_reason", tier, reason);
+    }
+
+    /**
+     * 两个档位各自为什么没给出结果。
+     *
+     * <p>以前只有一个字符串「AI 调用失败：xxx」，玩家根本分不清是 Key 没填、今天配额用完了，
+     * 还是端点挂了 —— 而这三件事的修法完全不同。所以这里把两档的原因分开说。</p>
+     */
+    private static String describeChainFailure(com.nowweather.core.llm.LlmTiers.Outcome outcome) {
+        String primary = outcome.primary() == null
+                ? Text.tr("nowweather.command.llm.reason.not_tried")
+                : describeTierStatus(outcome.primary(), false);
+        String secondary = outcome.secondary() == null
+                ? Text.tr("nowweather.command.llm.reason.not_tried")
+                : describeTierStatus(outcome.secondary(), true);
+        return Text.tr("nowweather.command.llm.both_unavailable", primary, secondary);
     }
 
     /**
@@ -517,6 +633,10 @@ public final class NowWeatherCommand {
      * <p>安全边界：模型只能返回<b>白名单内的键</b>（由 {@code ConfigEntries.serverKeys()} 给出，
      * 服务端会滤掉客户端项），最终每一项都要过 {@code ConfigEntries} 的同一套范围校验 ——
      * 也就是说 AI 没有任何绕过校验、写到危险值的能力。</p>
+     *
+     * <p>★ 本命令<b>不占用配额</b>：它改的是配置，不是「花钱的天气推算」，
+     * 用配额去卡它只会让玩家在「配置写错了、想用 AI 改回来」的时候被卡住。
+     * 但它和 {@code forecast ai} 走同一条「主 → 副」回落链。</p>
      */
     private static int ask(CommandSourceStack source, String text) {
         if (!ForgeConfig.COMMON.llmEnabled.get()) {
@@ -525,7 +645,11 @@ public final class NowWeatherCommand {
         if (!ForgeConfig.COMMON.llmAllowConfigEdits.get()) {
             return fail(source, Text.tr("nowweather.command.config.ask.edits_disabled"));
         }
-        if (ForgeConfig.COMMON.llmApiKey.get().isBlank()) {
+        com.nowweather.core.llm.LlmTiers.Tier primaryTier = ConfigBridge.llmPrimaryTier();
+        com.nowweather.core.llm.LlmTiers.Tier secondaryTier = ConfigBridge.llmSecondaryTier();
+        // 两个档位都没配齐就没必要开线程了（副档位没启用时它也不算「可用」）
+        if (!primaryTier.configured()
+                && !(secondaryTier.enabled() && secondaryTier.configured())) {
             return fail(source, Text.tr("nowweather.command.config.ask.no_key"));
         }
         List<String> allowed = ConfigEntries.serverKeys();
@@ -533,13 +657,32 @@ public final class NowWeatherCommand {
                 + Text.tr("nowweather.command.config.ask.asking", String.valueOf(allowed.size()))), false);
 
         final String question = text;
+        final int utcOffset = llmUtcOffsetSeconds(source);
         Thread worker = new Thread(() -> {
             com.nowweather.core.llm.WeatherAssistant assistant =
                     new com.nowweather.core.llm.WeatherAssistant(new com.nowweather.core.llm.LlmClient(
                             new com.nowweather.core.http.JdkHttpTransport()));
-            com.nowweather.core.llm.WeatherAssistant.ConfigPatch patch = assistant.parseIntent(
-                    ConfigBridge.llmOptions(), question, allowed, ConfigBridge.llmConfigSnapshot());
-            source.getServer().execute(() -> applyPatch(source, patch));
+            // 回落链的回调只回传 Reply（它才是判断成败的依据），解析结果放在这一格；
+            // 因为链在第一个成功处就停下，所以这一格一定是「最终生效的那一次」。
+            com.nowweather.core.llm.WeatherAssistant.IntentAttempt[] last =
+                    new com.nowweather.core.llm.WeatherAssistant.IntentAttempt[1];
+            com.nowweather.core.llm.LlmTiers.Outcome outcome;
+            synchronized (LLM_STATE_LOCK) {
+                // 不限量闸门：ask 不动配额（但这次调用仍然要在锁里，避免与 forecast ai 打架）
+                outcome = com.nowweather.core.llm.LlmTiers.run(primaryTier, secondaryTier,
+                        com.nowweather.core.llm.LlmTiers.UNLIMITED, options -> {
+                            com.nowweather.core.llm.WeatherAssistant.IntentAttempt attempt =
+                                    assistant.parseIntentAttempt(options, question, allowed,
+                                            ConfigBridge.llmConfigSnapshot());
+                            last[0] = attempt;
+                            return attempt.reply();
+                        });
+            }
+            com.nowweather.core.llm.WeatherAssistant.ConfigPatch patch = last[0] != null
+                    ? last[0].patch()
+                    : com.nowweather.core.llm.WeatherAssistant.ConfigPatch.failure("没有可用的模型档位");
+            // Text.tr 一律在主线程做（语言表不是为跨线程并发设计的），所以只把结果带过去
+            source.getServer().execute(() -> applyPatch(source, patch, outcome));
         }, "NowWeather-Ask");
         worker.setDaemon(true);
         worker.start();
@@ -547,11 +690,17 @@ public final class NowWeatherCommand {
     }
 
     /** 把 AI 给出的改动逐项落到配置上。每一项都走与配置界面相同的校验。 */
-    private static void applyPatch(CommandSourceStack source, WeatherAssistant.ConfigPatch patch) {
+    private static void applyPatch(CommandSourceStack source, WeatherAssistant.ConfigPatch patch,
+                                   com.nowweather.core.llm.LlmTiers.Outcome outcome) {
         if (!patch.success()) {
             NowWeatherLog.LOGGER.warn("[AI ask 失败] {}", patch.error());
+            // 两种失败要分开说：链本身没成功（说两档各自的原因），
+            // 或者模型回话了但输出不是约定的 JSON（那是模型没守格式，不是档位问题）。
+            String detail = outcome.success()
+                    ? patch.error()
+                    : describeChainFailure(outcome) + (patch.error().isEmpty() ? "" : "｜" + patch.error());
             source.sendFailure(new TextComponent(ChatFormatting.RED
-                    + Text.tr("nowweather.command.config.ask.failed", patch.error())));
+                    + Text.tr("nowweather.command.config.ask.failed", detail)));
             return;
         }
         NowWeatherLog.LOGGER.info("[AI ask] 回复：{} | 建议改动 {} 项", patch.reply(), patch.changes().size());
@@ -562,6 +711,7 @@ public final class NowWeatherCommand {
         }
         if (patch.isEmpty()) {
             sb.append(ChatFormatting.GRAY).append(Text.tr("nowweather.command.config.ask.no_changes"));
+            appendDowngradeNote(sb, outcome);
             source.sendSuccess(new TextComponent(sb.toString()), false);
             return;
         }
@@ -600,10 +750,27 @@ public final class NowWeatherCommand {
                         .append(Text.tr("nowweather.command.config.ask.save_failed", e.getMessage()));
             }
         }
+        appendDowngradeNote(sb, outcome);
         source.sendSuccess(new TextComponent(sb.toString()), false);
     }
 
-    /** {@code /nowweather forecast ai}：用 AI 辅助推算一次天气（每天最多一次）。 */
+    /** 结果来自副模型时补一句说明（主模型配额用完 / 调用失败时，答案可能和往常不一样）。 */
+    private static void appendDowngradeNote(StringBuilder sb,
+                                            com.nowweather.core.llm.LlmTiers.Outcome outcome) {
+        if (outcome != null && outcome.usedSecondary()) {
+            sb.append('\n').append(ChatFormatting.YELLOW)
+                    .append(Text.tr("nowweather.command.llm.downgraded"));
+        }
+    }
+
+    /**
+     * {@code /nowweather forecast ai}：用 AI 辅助推算一次天气。
+     *
+     * <p>配额：<b>每个档位每天 N 次</b>（{@code llm.dailyCalls} / {@code llm.secondary.dailyCalls}），
+     * 按本地日重置。这里刻意<b>不</b>在开头预先判断「今天还有没有额度」——
+     * 主档位用完了副档位可能还能用，提前拦住就等于白配了副模型；
+     * 判断交给回落链，只有两个档位都不可用才报错，并把各自的原因分开说。</p>
+     */
     private static int aiWeather(CommandSourceStack source) {
         NowWeatherRuntime runtime = NowWeatherMod.runtime();
         if (runtime == null) {
@@ -614,13 +781,6 @@ public final class NowWeatherCommand {
         }
         if (!ForgeConfig.COMMON.llmWeatherDaily.get()) {
             return fail(source, Text.tr("nowweather.command.forecast.ai.daily_disabled"));
-        }
-        long now = System.currentTimeMillis();
-        long last = lastLlmCallEpochMillis();
-        if (!WeatherAssistant.budgetAvailable(last, now)) {
-            long remain = WeatherAssistant.budgetRemainingMillis(last, now);
-            return fail(source, Text.tr("nowweather.command.forecast.ai.budget_used",
-                    String.format(Locale.ROOT, "%.1f", remain / 3600_000.0D)));
         }
         com.nowweather.core.cache.LocationProfile location = runtime.controller().locationProfile();
         com.nowweather.core.weather.WeatherObservation current = runtime.controller().observation();
@@ -646,21 +806,45 @@ public final class NowWeatherCommand {
                         String.format(Locale.ROOT, "%.0f", current.humidityPercent()),
                         String.valueOf(current.windScale()));
 
+        com.nowweather.core.llm.LlmTiers.Tier primaryTier = ConfigBridge.llmPrimaryTier();
+        com.nowweather.core.llm.LlmTiers.Tier secondaryTier = ConfigBridge.llmSecondaryTier();
+        final int utcOffset = llmUtcOffsetSeconds(source);
+
         source.sendSuccess(new TextComponent(ChatFormatting.GRAY
                 + Text.tr("nowweather.command.forecast.ai.asking")), false);
         Thread worker = new Thread(() -> {
             WeatherAssistant assistant = new WeatherAssistant(
                     new com.nowweather.core.llm.LlmClient(new com.nowweather.core.http.JdkHttpTransport()));
-            WeatherAssistant.WeatherSuggestion suggestion =
-                    assistant.deriveWeather(ConfigBridge.llmOptions(), local, context);
-            if (suggestion.success()) {
-                recordLlmCall(System.currentTimeMillis());
+            // 同 ask：回调只回传 Reply，解析结果放在这一格里（链在第一个成功处停下，
+            // 所以它就是「最终生效的那一次」）。
+            WeatherAssistant.WeatherAttempt[] last = new WeatherAssistant.WeatherAttempt[1];
+            com.nowweather.core.llm.LlmTiers.Outcome outcome;
+            synchronized (LLM_STATE_LOCK) {
+                QuotaSession session = new QuotaSession(System.currentTimeMillis(), utcOffset);
+                outcome = com.nowweather.core.llm.LlmTiers.run(primaryTier, secondaryTier, session,
+                        options -> {
+                            WeatherAssistant.WeatherAttempt attempt =
+                                    assistant.deriveWeatherAttempt(options, local, context);
+                            last[0] = attempt;
+                            return attempt.reply();
+                        });
+                // 真的发过请求的档位才扣配额（失败也扣：请求已经发出去了）
+                session.account(outcome);
             }
+            WeatherAssistant.WeatherSuggestion suggestion = last[0] == null
+                    ? WeatherAssistant.WeatherSuggestion.failure("没有可用的模型档位")
+                    : last[0].suggestion();
+            final boolean downgraded = outcome.usedSecondary();
             source.getServer().execute(() -> {
                 if (!suggestion.success()) {
-                    NowWeatherLog.LOGGER.warn("[AI 推算失败] {}", suggestion.error());
+                    // 两种失败要分开说：链本身没成功（说两档各自的原因），
+                    // 或者模型确实回话了我们却解析不出天气（那是模型没守格式，不是档位问题）。
+                    String failure = outcome.success()
+                            ? Text.tr("nowweather.command.forecast.ai.bad_output", suggestion.error())
+                            : describeChainFailure(outcome);
+                    NowWeatherLog.LOGGER.warn("[AI 推算失败] {}", failure);
                     source.sendFailure(new TextComponent(ChatFormatting.RED
-                            + Text.tr("nowweather.command.forecast.ai.failed", suggestion.error())));
+                            + Text.tr("nowweather.command.forecast.ai.failed", failure)));
                     return;
                 }
                 // ★ 异步结果必须写日志：RCON 在命令返回时就结束了，拿不到后续异步回复，
@@ -673,6 +857,12 @@ public final class NowWeatherCommand {
                         suggestion.reason());
                 StringBuilder sb = new StringBuilder();
                 sb.append(ChatFormatting.AQUA).append(Text.tr("nowweather.command.forecast.ai.header")).append('\n');
+                if (downgraded) {
+                    // 必须说清这是副模型给的结果：主模型配额用完 / 调用失败时，
+                    // 玩家看到的温度可能和昨天的不一样，不说一句会被当成 bug。
+                    sb.append(ChatFormatting.YELLOW)
+                            .append(Text.tr("nowweather.command.llm.downgraded")).append('\n');
+                }
                 sb.append(ChatFormatting.GRAY).append(Text.tr("nowweather.command.forecast.ai.label.local")).append(' ')
                         .append(ChatFormatting.WHITE).append(localDisplay).append('\n');
                 sb.append(ChatFormatting.GRAY).append(Text.tr("nowweather.command.forecast.ai.label.suggestion")).append(' ')
@@ -701,11 +891,25 @@ public final class NowWeatherCommand {
         return 1;
     }
 
-    /** {@code /nowweather info llm}：LLM 状态与预算。 */
+    /**
+     * {@code /nowweather info llm}：LLM 状态、两个档位的参数与今日配额。
+     *
+     * <p>这里是玩家排查「为什么 AI 不工作」的唯一入口，所以必须一眼看出：</p>
+     * <ul>
+     *   <li>主 / 副两个档位分别有没有启用、配齐、还剩几次配额；</li>
+     *   <li>两个档位各自的温度 / 超时 / 输出上限（三个最常被怀疑的旋钮）；</li>
+     *   <li>当前实际会走哪一档：「主模型可用 / 已降级到副模型 / 两者都不可用」。</li>
+     * </ul>
+     */
     private static int llmStatus(CommandSourceStack source) {
         long now = System.currentTimeMillis();
-        long last = lastLlmCallEpochMillis();
-        long remain = WeatherAssistant.budgetRemainingMillis(last, now);
+        int utcOffset = llmUtcOffsetSeconds(source);
+        com.nowweather.core.llm.DailyCallQuota.Usage usage = loadLlmUsage(now, utcOffset);
+        com.nowweather.core.llm.LlmTiers.Tier primary = ConfigBridge.llmPrimaryTier();
+        com.nowweather.core.llm.LlmTiers.Tier secondary = ConfigBridge.llmSecondaryTier();
+        boolean primaryReady = tierReady(primary, false, usage, now, utcOffset);
+        boolean secondaryReady = tierReady(secondary, true, usage, now, utcOffset);
+
         StringBuilder sb = new StringBuilder();
         sb.append(ChatFormatting.AQUA).append(Text.tr("nowweather.command.info.llm.header")).append('\n');
         sb.append(ChatFormatting.GRAY).append(Text.tr("nowweather.command.info.llm.label.enabled")).append(' ')
@@ -715,27 +919,20 @@ public final class NowWeatherCommand {
                         : Text.tr("nowweather.command.common.off"))
                 .append('\n');
         sb.append(ChatFormatting.GRAY)
-                .append(Text.tr("nowweather.command.info.llm.field.model",
-                        ForgeConfig.COMMON.llmModel.get(),
-                        ForgeConfig.COMMON.llmThinking.get()
-                                ? Text.tr("nowweather.command.info.llm.thinking_on")
-                                : Text.tr("nowweather.command.common.switch_off")))
-                .append('\n');
-        sb.append(ChatFormatting.GRAY).append(Text.tr("nowweather.command.info.llm.label.api_key")).append(' ')
-                .append(ChatFormatting.WHITE)
-                .append(ForgeConfig.COMMON.llmApiKey.get().isBlank()
-                        ? Text.tr("nowweather.command.info.llm.key_unset")
-                        : Text.tr("nowweather.command.info.llm.key_set"))
-                .append('\n');
-        sb.append(ChatFormatting.GRAY)
                 .append(Text.tr("nowweather.command.info.llm.field.daily",
                         ForgeConfig.COMMON.llmWeatherDaily.get()
                                 ? Text.tr("nowweather.command.common.switch_on")
-                                : Text.tr("nowweather.command.common.switch_off"),
-                        remain == 0L
-                                ? Text.tr("nowweather.command.info.llm.budget_available")
-                                : Text.tr("nowweather.command.info.llm.budget_remaining",
-                                        String.format(Locale.ROOT, "%.1f", remain / 3600_000.0D))))
+                                : Text.tr("nowweather.command.common.switch_off")))
+                .append('\n');
+        appendTierStatus(sb, false, primary, usage, now, utcOffset);
+        appendTierStatus(sb, true, secondary, usage, now, utcOffset);
+        sb.append(ChatFormatting.GRAY)
+                .append(Text.tr("nowweather.command.info.llm.field.chain",
+                        primaryReady
+                                ? Text.tr("nowweather.command.info.llm.chain.primary")
+                                : secondaryReady
+                                        ? Text.tr("nowweather.command.info.llm.chain.secondary")
+                                        : Text.tr("nowweather.command.info.llm.chain.none")))
                 .append('\n');
         sb.append(ChatFormatting.GRAY)
                 .append(Text.tr("nowweather.command.info.llm.field.nl_edit",
@@ -747,6 +944,68 @@ public final class NowWeatherCommand {
                 .append(Text.tr("nowweather.command.info.llm.usage"));
         source.sendSuccess(new TextComponent(sb.toString()), false);
         return 1;
+    }
+
+    /** 某一档「现在能不能用」：启用 + 配齐 + 今天还有配额。 */
+    private static boolean tierReady(com.nowweather.core.llm.LlmTiers.Tier tier, boolean secondary,
+                                     com.nowweather.core.llm.DailyCallQuota.Usage usage,
+                                     long nowMillis, int utcOffsetSeconds) {
+        return tier.enabled() && tier.configured()
+                && com.nowweather.core.llm.DailyCallQuota.available(
+                        usage, secondary, tier.dailyCalls(), nowMillis, utcOffsetSeconds);
+    }
+
+    /** 输出一档的完整信息（启用状态 / 模型 / Key / 端点 / 参数 / 今日配额）。 */
+    private static void appendTierStatus(StringBuilder sb, boolean secondary,
+                                         com.nowweather.core.llm.LlmTiers.Tier tier,
+                                         com.nowweather.core.llm.DailyCallQuota.Usage usage,
+                                         long nowMillis, int utcOffsetSeconds) {
+        com.nowweather.core.llm.LlmClient.Options options = tier.options();
+        sb.append(ChatFormatting.YELLOW).append(Text.tr(secondary
+                        ? "nowweather.command.info.llm.label.secondary"
+                        : "nowweather.command.info.llm.label.primary"))
+                .append(ChatFormatting.WHITE).append(' ')
+                .append(tier.enabled()
+                        ? Text.tr("nowweather.command.common.on")
+                        : Text.tr("nowweather.command.common.off"))
+                .append('\n');
+        String indent = "  ";
+        sb.append(ChatFormatting.GRAY).append(indent)
+                .append(Text.tr("nowweather.command.info.llm.field.model",
+                        blankOr(options.model(), Text.tr("nowweather.command.common.unknown")),
+                        options.thinking()
+                                ? Text.tr("nowweather.command.info.llm.thinking_on")
+                                : Text.tr("nowweather.command.common.switch_off")))
+                .append('\n');
+        sb.append(ChatFormatting.GRAY).append(indent)
+                .append(Text.tr("nowweather.command.info.llm.label.api_key")).append(' ')
+                .append(ChatFormatting.WHITE)
+                .append(options.apiKey() == null || options.apiKey().isBlank()
+                        ? Text.tr("nowweather.command.info.llm.key_unset")
+                        : Text.tr("nowweather.command.info.llm.key_set"))
+                .append('\n');
+        sb.append(ChatFormatting.GRAY).append(indent)
+                .append(Text.tr("nowweather.command.info.llm.label.endpoint")).append(' ')
+                .append(ChatFormatting.WHITE)
+                .append(blankOr(options.endpoint(), Text.tr("nowweather.command.common.unknown")))
+                .append('\n');
+        sb.append(ChatFormatting.GRAY).append(indent)
+                .append(Text.tr("nowweather.command.info.llm.field.tier_params",
+                        String.format(Locale.ROOT, "%.2f", options.temperature()),
+                        String.format(Locale.ROOT, "%.0f", options.timeoutMillis() / 1000.0D),
+                        String.valueOf(options.maxTokens())))
+                .append('\n');
+        sb.append(ChatFormatting.GRAY).append(indent)
+                .append(Text.tr("nowweather.command.info.llm.field.tier_quota",
+                        String.valueOf(com.nowweather.core.llm.DailyCallQuota.used(
+                                usage, secondary, nowMillis, utcOffsetSeconds)),
+                        String.valueOf(tier.dailyCalls())))
+                .append('\n');
+    }
+
+    /** 空串换成占位文本（未配置时别在界面上留一行空白）。 */
+    private static String blankOr(String value, String fallback) {
+        return value == null || value.isBlank() ? fallback : value;
     }
 
     /** {@code /nowweather info weather2}：查看与 Weather, Storms &amp; Tornadoes 的联动探测结果。 */

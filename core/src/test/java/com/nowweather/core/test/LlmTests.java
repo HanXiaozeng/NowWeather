@@ -1,9 +1,17 @@
 package com.nowweather.core.test;
 
+import com.nowweather.core.http.HttpException;
+import com.nowweather.core.http.HttpRequestSpec;
+import com.nowweather.core.http.HttpResult;
+import com.nowweather.core.http.HttpTransport;
+import com.nowweather.core.llm.DailyCallQuota;
 import com.nowweather.core.llm.LlmClient;
+import com.nowweather.core.llm.LlmTiers;
 import com.nowweather.core.llm.WeatherAssistant;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * LLM 接入测试。
@@ -26,8 +34,20 @@ final class LlmTests {
         T.section("LLM 客户端：请求构造与错误处理");
         client();
 
-        T.section("每日一次预算（省成本）");
+        T.section("thinking 字段只发给 DeepSeek");
+        thinkingGating();
+
+        T.section("每日一次预算（旧机制，已废弃但保留）");
         budget();
+
+        T.section("每日调用配额（每个档位独立、按本地日重置）");
+        quota();
+
+        T.section("配额账本的持久化与旧结构兼容");
+        quotaState();
+
+        T.section("双档位回落：主失败 → 副成功");
+        fallback();
 
         T.section("AI 辅助天气");
         derive();
@@ -96,6 +116,50 @@ final class LlmTests {
         T.check("非 JSON 响应被兜住", !broken.success());
     }
 
+    /**
+     * 缺陷修复 ①：{@code thinking} 是 DeepSeek 专有字段，只能发给 DeepSeek 端点。
+     *
+     * <p>验证方式分两层：既断言「实际发出去的请求体里有没有这个字段」（用假传输层捕获正文），
+     * 也直接单测判定函数本身 —— 光测请求体只能覆盖到两个端点，判定函数的边界（null / 大小写 /
+     * 自建反代）还得单独点一下。</p>
+     */
+    private static void thinkingGating() {
+        // 1) DeepSeek 端点：照旧发送 thinking:disabled
+        T.FakeTransport deepseek = T.fakeTransport(OK_REPLY);
+        new LlmClient(deepseek).chat(options(), "系统提示", "用户输入");
+        T.check("DeepSeek 端点仍然带 thinking 字段（省输出 token）",
+                deepseek.lastRequestBody().contains("thinking"));
+
+        // 2) 非 DeepSeek 端点：一个字都不能出现 —— 否则 Ollama / vLLM / OneAPI 可能直接 400
+        String localEndpoint = "http://127.0.0.1:11434/v1/chat/completions";
+        T.FakeTransport local = T.fakeTransport(OK_REPLY);
+        LlmClient.Options localOptions = options().withEndpoint(localEndpoint);
+        new LlmClient(local).chat(localOptions, "系统提示", "用户输入");
+        String body = local.lastRequestBody();
+        T.check("★ 非 DeepSeek 端点不再发送 thinking 字段", !body.contains("thinking"));
+        T.check("其余字段照常发送（model / max_tokens / stream）",
+                body.contains("deepseek-v4-flash") && body.contains("max_tokens")
+                        && body.contains("stream"));
+        T.check("请求确实打到了那个端点", local.lastUrl().equals(localEndpoint));
+
+        // 3) 思考模式打开时本来就不发 disabled（两种端点都一样）
+        T.FakeTransport on = T.fakeTransport(OK_REPLY);
+        new LlmClient(on).chat(options().withThinking(true), "s", "u");
+        T.check("思考模式打开时不发 disabled", !on.lastRequestBody().contains("thinking"));
+
+        // 4) 判定函数本身
+        T.check("判定：DeepSeek 官方端点", LlmClient.supportsThinkingField(
+                "https://api.deepseek.com/chat/completions"));
+        T.check("判定：大小写不敏感（URL 是玩家手填的）", LlmClient.supportsThinkingField(
+                "https://API.DeepSeek.com/v1/chat/completions"));
+        T.check("判定：自建反代里带 deepseek 也算", LlmClient.supportsThinkingField(
+                "https://llm.example.com/deepseek/v1/chat/completions"));
+        T.check("判定：OpenRouter 不算", !LlmClient.supportsThinkingField(
+                "https://openrouter.ai/api/v1/chat/completions"));
+        T.check("判定：Ollama 不算", !LlmClient.supportsThinkingField(localEndpoint));
+        T.check("判定：null 端点不算（不抛异常）", !LlmClient.supportsThinkingField(null));
+    }
+
     private static void budget() {
         long now = 1_789_300_000_000L;
         T.check("从未调用过 → 可用", WeatherAssistant.budgetAvailable(0L, now));
@@ -105,6 +169,200 @@ final class LlmTests {
         T.near("刚调用过时剩余 ≈ 24 小时", 24.0D,
                 WeatherAssistant.budgetRemainingMillis(now - 1000L, now) / 3600_000.0D, 0.01D);
         T.near("可用时剩余 = 0", 0.0D, WeatherAssistant.budgetRemainingMillis(0L, now), 1.0E-9D);
+    }
+
+    /** 东八区的某个时刻（测试统一用它，避免依赖运行机器的时区）。 */
+    private static final long NOW = 1_790_500_000_000L;
+    private static final int OFFSET_SECONDS = 8 * 3600;
+
+    private static void quota() {
+        DailyCallQuota.Usage empty = DailyCallQuota.Usage.EMPTY;
+        T.check("空账本 → 主模型可用", DailyCallQuota.available(empty, false, 1, NOW, OFFSET_SECONDS));
+        T.check("空账本 → 副模型可用", DailyCallQuota.available(empty, true, 2, NOW, OFFSET_SECONDS));
+
+        DailyCallQuota.Usage one = DailyCallQuota.consume(empty, false, NOW, OFFSET_SECONDS);
+        T.eq("主模型用掉 1 次后计数 = 1", 1, DailyCallQuota.used(one, false, NOW, OFFSET_SECONDS));
+        T.check("配额 = 1 时用完 → 不可调用",
+                !DailyCallQuota.available(one, false, 1, NOW, OFFSET_SECONDS));
+        T.check("★ 副档位不受主档位影响（各自独立计数）",
+                DailyCallQuota.available(one, true, 2, NOW, OFFSET_SECONDS));
+
+        DailyCallQuota.Usage two = DailyCallQuota.consume(one, false, NOW, OFFSET_SECONDS);
+        T.eq("再扣一次 → 2", 2, DailyCallQuota.used(two, false, NOW, OFFSET_SECONDS));
+        T.check("配额 = 3 时仍有额度", DailyCallQuota.available(two, false, 3, NOW, OFFSET_SECONDS));
+        T.check("配额 = 2 时刚好用完", !DailyCallQuota.available(two, false, 2, NOW, OFFSET_SECONDS));
+
+        // ---- 跨天重置：按「本地日」，不是「距上次 24 小时」
+        long dayStartLocal = DailyCallQuota.dayKey(NOW, OFFSET_SECONDS) * 86_400_000L
+                - OFFSET_SECONDS * 1000L; // 本地 00:00 对应的 epoch 毫秒
+        long lateNight = dayStartLocal + 86_400_000L - 60_000L;   // 本地 23:59
+        long nextMidnight = dayStartLocal + 86_400_000L + 60_000L; // 次日 00:01
+        DailyCallQuota.Usage usedLate = DailyCallQuota.consume(new DailyCallQuota.Usage(
+                (int) DailyCallQuota.dayKey(lateNight, OFFSET_SECONDS), 0, 0, 0L, 0L),
+                false, lateNight, OFFSET_SECONDS);
+        T.eq("23:59 已用 1 次", 1,
+                DailyCallQuota.used(usedLate, false, lateNight, OFFSET_SECONDS));
+        T.check("★ 跨过本地零点后即使只过 2 分钟也重置（不是距上次 24 小时）",
+                DailyCallQuota.available(usedLate, false, 1, nextMidnight, OFFSET_SECONDS));
+        T.eq("跨天后计数读出来是 0", 0,
+                DailyCallQuota.used(usedLate, false, nextMidnight, OFFSET_SECONDS));
+
+        // 时区偏移确实参与日键计算：同一时刻在东八区与 UTC 可能不是同一天
+        T.check("日键包含时区偏移（UTC 同刻的日键不大于东八区）",
+                DailyCallQuota.dayKey(NOW, 0) <= DailyCallQuota.dayKey(NOW, OFFSET_SECONDS));
+    }
+
+    private static void quotaState() {
+        // ---- 旧结构兼容：只有 weatherCallAt
+        String legacyJson = "{\"weatherCallAt\":" + (NOW - 3_600_000L)
+                + ",\"note\":\"AI 辅助天气推算每天最多一次\"}";
+        DailyCallQuota.Usage legacy = DailyCallQuota.parse(legacyJson, NOW, OFFSET_SECONDS);
+        T.eq("★ 旧结构 → 主模型今天已用 1 次", 1,
+                DailyCallQuota.used(legacy, false, NOW, OFFSET_SECONDS));
+        T.eq("旧结构 → 副模型仍是 0", 0,
+                DailyCallQuota.used(legacy, true, NOW, OFFSET_SECONDS));
+        T.check("旧结构 + 配额 1 → 今天不可再调",
+                !DailyCallQuota.available(legacy, false, 1, NOW, OFFSET_SECONDS));
+
+        // ---- 新结构往返
+        DailyCallQuota.Usage used = DailyCallQuota.consume(
+                DailyCallQuota.consume(DailyCallQuota.Usage.EMPTY, false, NOW, OFFSET_SECONDS),
+                true, NOW, OFFSET_SECONDS);
+        String json = DailyCallQuota.toJson(used);
+        T.check("写出的 JSON 有新结构字段", json.contains("\"dayKey\"")
+                && json.contains("\"primary\"") && json.contains("\"secondary\"")
+                && json.contains("\"used\"") && json.contains("\"lastAt\""));
+        DailyCallQuota.Usage round = DailyCallQuota.parse(json, NOW, OFFSET_SECONDS);
+        T.eq("往返后主模型 1 次", 1, DailyCallQuota.used(round, false, NOW, OFFSET_SECONDS));
+        T.eq("往返后副模型 1 次", 1, DailyCallQuota.used(round, true, NOW, OFFSET_SECONDS));
+
+        // ---- 坏输入不能把功能弄挂
+        T.check("非 JSON 返回空账本而不是抛异常",
+                DailyCallQuota.used(DailyCallQuota.parse("not json at all", NOW, OFFSET_SECONDS),
+                        false, NOW, OFFSET_SECONDS) == 0);
+        T.check("空文本返回空账本",
+                DailyCallQuota.used(DailyCallQuota.parse("", NOW, OFFSET_SECONDS),
+                        false, NOW, OFFSET_SECONDS) == 0);
+        T.check("null 返回空账本",
+                DailyCallQuota.used(DailyCallQuota.parse(null, NOW, OFFSET_SECONDS),
+                        false, NOW, OFFSET_SECONDS) == 0);
+    }
+
+    /**
+     * 缺陷修复 ② 之外的核心：主 → 副回落。
+     *
+     * <p>用一个「按调用顺序依次返回预设响应」的假传输，把「主失败、副成功」这条最关键的路径
+     * 完整跑一遍（连请求 URL 都检查，确认第二次真的打到了副模型的端点）。</p>
+     */
+    private static void fallback() {
+        String secondaryEndpoint = "http://127.0.0.1:11434/v1/chat/completions";
+        LlmClient.Options primaryOptions = options();
+        LlmClient.Options secondaryOptions = options()
+                .withEndpoint(secondaryEndpoint)
+                .withModel("qwen2.5:7b");
+        LlmTiers.Tier primary = LlmTiers.Tier.primary(primaryOptions, 1);
+        LlmTiers.Tier secondary = LlmTiers.Tier.secondary(true, secondaryOptions, 2);
+
+        // 1) 主 401 失败 → 副成功
+        ScriptedTransport failThenOk = new ScriptedTransport()
+                .thenStatus(401, "{}")
+                .thenOk(OK_REPLY);
+        LlmClient client = new LlmClient(failThenOk);
+        LlmTiers.Outcome outcome = LlmTiers.run(primary, secondary, LlmTiers.UNLIMITED,
+                options -> client.chat(options, "s", "u"));
+        T.check("★ 主失败 → 副成功，整体算成功", outcome.success());
+        T.check("结果标记为「已降级到副模型」", outcome.usedSecondary());
+        T.eq("一共发了两次请求", 2, failThenOk.urls.size());
+        T.eq("主档位的状态 = 失败", LlmTiers.Status.FAILED, outcome.primary().status());
+        T.eq("副档位的状态 = 成功", LlmTiers.Status.SUCCEEDED, outcome.secondary().status());
+        T.eq("第二次真的打到了副模型端点", secondaryEndpoint, failThenOk.urls.get(1));
+
+        // 2) 主成功 → 副模型一次都不该花钱
+        ScriptedTransport primaryOk = new ScriptedTransport().thenOk(OK_REPLY);
+        LlmClient okClient = new LlmClient(primaryOk);
+        LlmTiers.Outcome primaryOnly = LlmTiers.run(primary, secondary, LlmTiers.UNLIMITED,
+                options -> okClient.chat(options, "s", "u"));
+        T.check("主成功 → 整体成功且不算降级",
+                primaryOnly.success() && !primaryOnly.usedSecondary());
+        T.eq("主成功时只发一次请求", 1, primaryOk.urls.size());
+        T.check("主成功时副档位压根没被尝试", primaryOnly.secondary() == null);
+
+        // 3) 主配额用完 → 直接用副模型（也不该因为主档位配额用尽而整体失败）
+        ScriptedTransport quotaOnly = new ScriptedTransport().thenOk(OK_REPLY);
+        LlmClient quotaClient = new LlmClient(quotaOnly);
+        LlmTiers.Outcome fromSecondary = LlmTiers.run(primary, secondary,
+                (isSecondary, dailyCalls) -> isSecondary,
+                options -> quotaClient.chat(options, "s", "u"));
+        T.eq("★ 主档位：配额用完", LlmTiers.Status.SKIPPED_QUOTA, fromSecondary.primary().status());
+        T.check("主配额用完时副模型接手", fromSecondary.success() && fromSecondary.usedSecondary());
+        T.eq("只发了 1 次请求（主档位被跳过）", 1, quotaOnly.urls.size());
+
+        // 4) 主未配置、副未启用 → 两个都不可用，且原因分得清
+        ScriptedTransport unused = new ScriptedTransport().thenOk(OK_REPLY);
+        LlmClient unusedClient = new LlmClient(unused);
+        LlmTiers.Outcome none = LlmTiers.run(
+                LlmTiers.Tier.primary(options().withModel(""), 1),
+                LlmTiers.Tier.secondary(false, secondaryOptions, 2),
+                LlmTiers.UNLIMITED,
+                options -> unusedClient.chat(options, "s", "u"));
+        T.check("两个都不可用 → 整体失败", !none.success());
+        T.eq("主档位：未配置", LlmTiers.Status.SKIPPED_NOT_CONFIGURED, none.primary().status());
+        T.eq("副档位：未启用", LlmTiers.Status.SKIPPED_DISABLED, none.secondary().status());
+        T.eq("两次都没发请求", 0, unused.callCount);
+
+        // 5) 全失败：两个档位各发一次，整体失败
+        ScriptedTransport allFail = new ScriptedTransport()
+                .thenStatus(401, "{}")
+                .thenStatus(500, "{}");
+        LlmClient allFailClient = new LlmClient(allFail);
+        LlmTiers.Outcome both = LlmTiers.run(primary, secondary, LlmTiers.UNLIMITED,
+                options -> allFailClient.chat(options, "s", "u"));
+        T.check("主副都失败 → 整体失败", !both.success());
+        T.eq("主档位失败", LlmTiers.Status.FAILED, both.primary().status());
+        T.eq("副档位失败", LlmTiers.Status.FAILED, both.secondary().status());
+        T.eq("两次都真的发了请求", 2, allFail.urls.size());
+
+        // 6) 走完整条链也要能拿到副模型的解析结果（回落不能只回一句「成功」）
+        ScriptedTransport derive = new ScriptedTransport()
+                .thenStatus(500, "{}")
+                .thenOk(OK_REPLY);
+        WeatherAssistant assistant = new WeatherAssistant(new LlmClient(derive));
+        WeatherAssistant.WeatherAttempt[] last = new WeatherAssistant.WeatherAttempt[1];
+        LlmTiers.Outcome chain = LlmTiers.run(primary, secondary, LlmTiers.UNLIMITED, options -> {
+            last[0] = assistant.deriveWeatherAttempt(options, "晴 27°C", "纬度 30.27");
+            return last[0].reply();
+        });
+        T.check("回落链整体成功", chain.success() && chain.usedSecondary());
+        T.check("副模型的结果被正常解析成天气建议",
+                last[0] != null && last[0].suggestion().success()
+                        && Math.abs(last[0].suggestion().temperatureC() - 22.5D) < 1.0E-9D);
+    }
+
+    /** 按顺序返回预设响应的假传输：回落测试必须能「第一次失败、第二次成功」。 */
+    private static final class ScriptedTransport implements HttpTransport {
+
+        private final List<HttpResult> script = new ArrayList<>();
+        private final List<String> urls = new ArrayList<>();
+        private int callCount;
+
+        ScriptedTransport thenOk(String body) {
+            script.add(new HttpResult(200, body, Map.of()));
+            return this;
+        }
+
+        ScriptedTransport thenStatus(int code, String body) {
+            script.add(new HttpResult(code, body, Map.of()));
+            return this;
+        }
+
+        @Override
+        public HttpResult execute(HttpRequestSpec spec) throws HttpException {
+            callCount++;
+            urls.add(spec.url());
+            // 脚本用完时就一直重复最后一条，免得测试因为多调了一次而越界
+            int index = Math.min(callCount - 1, script.size() - 1);
+            return script.get(index);
+        }
     }
 
     private static void derive() {

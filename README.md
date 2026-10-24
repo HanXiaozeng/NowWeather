@@ -536,14 +536,74 @@ HUD 与 `/nowweather status` 都会显示，离线数据也会标注「（推算
 
 默认**全部关闭**。开启后有两个用途：
 
-| 用途 | 命令 | 成本控制 |
+| 用途 | 命令 | 是否消耗每日配额 |
 | --- | --- | --- |
-| AI 辅助推算天气 | `/nowweather forecast ai` | **每天最多一次**（时间戳记在 `weather/nowweather/llm.json`，删掉即重置） |
-| 自然语言改配置 | `/nowweather config ask 把刷新间隔改成 600 秒` | 每次一句话，`llm.maxTokens` 默认 **1200**（范围 64~8192） |
+| AI 辅助推算天气 | `/nowweather forecast ai` | **是**（每个档位各有自己的额度） |
+| 自然语言改配置 | `/nowweather config ask 把刷新间隔改成 600 秒` | 否（但同样走主→副回落） |
 
-安全边界：模型**只能返回白名单内的配置键**（本地再卡一次，不依赖模型守规矩），
+### 双档位：主模型 + 副模型
+
+模型接入分成**两个档位**，各自独立配置、独立计费、独立配额：
+
+| 配置键 | 说明 | 默认 |
+| --- | --- | --- |
+| `llm.endpoint` / `llm.apiKey` / `llm.model` | 主模型 | DeepSeek |
+| `llm.temperature` | 主模型温度（0.0~2.0） | 0.2 |
+| `llm.timeoutSeconds` | 主模型单次超时（3~300 秒） | 30 |
+| `llm.dailyCalls` | 主模型每天最多调用几次（1~100） | 1 |
+| `llm.maxTokens` / `llm.thinking` | 主模型输出上限 / 思考模式 | 1200 / false |
+| `llm.secondary.enabled` | 是否启用副模型 | false |
+| `llm.secondary.apiKey` / `.endpoint` / `.model` | 副模型（**留空则沿用主模型的同名字段**，只填 Key 就能用） | 空 |
+| `llm.secondary.temperature` / `.timeoutSeconds` / `.maxTokens` / `.thinking` | 副模型各自的可调项 | 0.2 / 30 / 1200 / false |
+| `llm.secondary.dailyCalls` | 副模型每天最多调用几次（1~100） | 2 |
+
+**回落顺序（严格）**：
+
+1. 主模型：未配置 → 跳过；今日配额用完 → 跳过；否则发一次请求，成功即用；
+2. **只有主模型没成功**才轮到副模型：未启用 / 未配置 / 配额用完 → 跳过；否则再发一次；
+3. 两个都不可用时，会**逐档说明原因**，例如
+   `两个模型档位都不可用（主模型：今日配额已用完；副模型：未启用）`。
+
+`/nowweather info llm` 按 `[主模型]` / `[副模型]` 两块显示启用状态、模型名、端点、温度/超时/输出上限、
+以及「今日已用 N/M 次」，最后一行给出当前是「主模型可用 / 已降级到副模型 / 两者都不可用」。
+
+### 配额怎么算
+
+- **按本地日重置**，不是「距上次满 24 小时」——所以 23:59 用掉一次，00:01 立刻又有额度；
+- 账本在 `weather/nowweather/llm.json`：
+  `{"dayKey":20693,"primary":{"used":1,"lastAt":…},"secondary":{"used":0,"lastAt":0}}`；
+  **删掉这个文件即重置全部额度**；
+- **只有真正成功的那一次才扣配额**：Key 写错、网络不通、服务端报错都不扣，
+  免得「配错一次就把当天额度烧光」；
+- 读到旧格式（只有 `weatherCallAt`）时会按「主模型今天已用 1 次」处理，不会崩。
+
+### 接任意 OpenAI 兼容服务（Ollama / vLLM / LM Studio / OpenRouter …）
+
+客户端用的是标准 `/chat/completions` 协议，端点和模型名都能改。填的是**完整 URL**（含 `/chat/completions`）：
+
+```toml
+[llm]
+    # Ollama 云端：Key 在 https://ollama.com/settings/keys
+    endpoint = "https://ollama.com/v1/chat/completions"
+    apiKey   = "你的 ollama key"
+    model    = "gemma4:31b"
+
+    [llm.secondary]
+        enabled  = true
+        # 本地 Ollama 不需要真 Key，但客户端要求非空，随便填一个即可（"客户端需要一个 API Key 值，但 Ollama 会忽略它"）
+        endpoint = "http://127.0.0.1:11434/v1/chat/completions"
+        apiKey   = "ollama"
+        model    = "qwen3:8b"
+        timeoutSeconds = 180   # 本地小模型很慢，30 秒不够
+```
+
+> **`llm.thinking` 只对 DeepSeek 生效。** 那个 `thinking` 字段是 DeepSeek 专有的，
+> 别家严格实现会直接返回 400，所以模组**只在端点 URL 含 `deepseek` 时才发它**。
+
+### 安全边界
+
+模型**只能返回白名单内的配置键**（本地再卡一次，不依赖模型守规矩），
 且每一项都要过与游戏内配置界面**完全相同**的范围校验 —— AI 没有绕过校验的能力。
-默认关闭思考模式（`llm.thinking = false`），因为它会显著增加输出 token。
 
 真机实测（DeepSeek）：
 ```

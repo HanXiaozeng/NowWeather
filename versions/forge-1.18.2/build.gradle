@@ -21,7 +21,7 @@ buildscript {
 apply plugin: 'net.minecraftforge.gradle'
 apply plugin: 'java'
 
-version = rootProject.findProperty('mod_version') ?: '26b39i'
+version = rootProject.findProperty('mod_version') ?: '26b39j'
 group = 'com.nowweather'
 archivesBaseName = 'NowWeather-1.18.2'
 

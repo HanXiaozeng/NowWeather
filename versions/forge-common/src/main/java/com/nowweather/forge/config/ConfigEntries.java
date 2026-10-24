@@ -638,14 +638,32 @@ public final class ConfigEntries {
         add(list, Section.SYNC, "compat.yieldToModIds", c.yieldToModIds, false);
 
         // ---- LLM
+        //
+        // 主模型的键名沿用旧版（llm.apiKey / llm.endpoint / llm.model / llm.thinking / llm.maxTokens），
+        // 这样已部署的配置文件与玩家记熟的键都不会失效；新增的三个参数（temperature /
+        // timeoutSeconds / dailyCalls）也放在主模型上。副模型整体在 llm.secondary 子段里，
+        // 它的取值必须能通过命令（config set）改，所以同样登记在这里。
         add(list, Section.LLM, "llm.enabled", c.llmEnabled, false);
         add(list, Section.LLM, "llm.apiKey", c.llmApiKey, false);
         add(list, Section.LLM, "llm.endpoint", c.llmEndpoint, false);
         add(list, Section.LLM, "llm.model", c.llmModel, false);
         add(list, Section.LLM, "llm.thinking", c.llmThinking, false);
         add(list, Section.LLM, "llm.maxTokens", c.llmMaxTokens, 64, 8192);
+        add(list, Section.LLM, "llm.temperature", c.llmTemperature, 0.0D, 2.0D);
+        add(list, Section.LLM, "llm.timeoutSeconds", c.llmTimeoutSeconds, 3, 300);
+        add(list, Section.LLM, "llm.dailyCalls", c.llmDailyCalls, 1, 100);
         add(list, Section.LLM, "llm.weatherDaily", c.llmWeatherDaily, false);
         add(list, Section.LLM, "llm.allowConfigEdits", c.llmAllowConfigEdits, false);
+
+        add(list, Section.LLM, "llm.secondary.enabled", c.llmSecondaryEnabled, false);
+        add(list, Section.LLM, "llm.secondary.apiKey", c.llmSecondaryApiKey, false);
+        add(list, Section.LLM, "llm.secondary.endpoint", c.llmSecondaryEndpoint, false);
+        add(list, Section.LLM, "llm.secondary.model", c.llmSecondaryModel, false);
+        add(list, Section.LLM, "llm.secondary.thinking", c.llmSecondaryThinking, false);
+        add(list, Section.LLM, "llm.secondary.maxTokens", c.llmSecondaryMaxTokens, 64, 8192);
+        add(list, Section.LLM, "llm.secondary.temperature", c.llmSecondaryTemperature, 0.0D, 2.0D);
+        add(list, Section.LLM, "llm.secondary.timeoutSeconds", c.llmSecondaryTimeoutSeconds, 3, 300);
+        add(list, Section.LLM, "llm.secondary.dailyCalls", c.llmSecondaryDailyCalls, 1, 100);
 
         // ---- 调试
         add(list, Section.DEBUG, "debug.logProviderDiagnostics", c.logProviderDiagnostics, false);

@@ -26,6 +26,9 @@ Desktop.ini
 # 本地构建脚本产物
 tools/out/
 tools/logs/
+# 各个验证脚本临时编译出的 class 目录（不是交付物）
+build-selftest-core/
+build-selftest-forge/
 
 # 构建日志（本地排查用，不入库）
 build.log

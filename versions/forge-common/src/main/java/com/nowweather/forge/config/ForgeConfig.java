@@ -234,14 +234,32 @@ public final class ForgeConfig {
         public final ForgeConfigSpec.ConfigValue<List<? extends String>> yieldToModIds;
 
         // LLM（可选，默认关闭 —— 这是本项目唯一会产生费用的功能）
+        //
+        // 主模型沿用旧键名（apiKey / endpoint / model / thinking / maxTokens），
+        // 这样已经部署的配置文件不用改一个字节；temperature / timeoutSeconds / dailyCalls
+        // 是这次新增的主模型参数。副模型整体放在 llm.secondary 子段里。
         public final ForgeConfigSpec.BooleanValue llmEnabled;
         public final ForgeConfigSpec.ConfigValue<String> llmApiKey;
         public final ForgeConfigSpec.ConfigValue<String> llmEndpoint;
         public final ForgeConfigSpec.ConfigValue<String> llmModel;
         public final ForgeConfigSpec.BooleanValue llmThinking;
         public final ForgeConfigSpec.IntValue llmMaxTokens;
+        public final ForgeConfigSpec.DoubleValue llmTemperature;
+        public final ForgeConfigSpec.IntValue llmTimeoutSeconds;
+        public final ForgeConfigSpec.IntValue llmDailyCalls;
         public final ForgeConfigSpec.BooleanValue llmWeatherDaily;
         public final ForgeConfigSpec.BooleanValue llmAllowConfigEdits;
+
+        // LLM 副模型（主模型不可用时的回落档位）
+        public final ForgeConfigSpec.BooleanValue llmSecondaryEnabled;
+        public final ForgeConfigSpec.ConfigValue<String> llmSecondaryApiKey;
+        public final ForgeConfigSpec.ConfigValue<String> llmSecondaryEndpoint;
+        public final ForgeConfigSpec.ConfigValue<String> llmSecondaryModel;
+        public final ForgeConfigSpec.BooleanValue llmSecondaryThinking;
+        public final ForgeConfigSpec.IntValue llmSecondaryMaxTokens;
+        public final ForgeConfigSpec.DoubleValue llmSecondaryTemperature;
+        public final ForgeConfigSpec.IntValue llmSecondaryTimeoutSeconds;
+        public final ForgeConfigSpec.IntValue llmSecondaryDailyCalls;
 
         // 调试
         public final ForgeConfigSpec.BooleanValue logProviderDiagnostics;
@@ -500,24 +518,74 @@ public final class ForgeConfig {
 
             b.comment("LLM 助手（DeepSeek 等 OpenAI 兼容接口）",
                             "★ 这是本项目唯一会产生费用的功能，默认全部关闭。",
-                            "「每日一次」的天气推算会在缓存目录里记录上次调用时间，24 小时内不会重复调用。")
+                            "本段里的 apiKey / endpoint / model / thinking / maxTokens / temperature /",
+                            "timeoutSeconds / dailyCalls 都是<b>主模型</b>的（键名沿用旧版，已部署的配置不会被破坏）；",
+                            "主模型不可用（未配置 / 配额用完 / 调用失败）时会自动回落到 [llm.secondary] 副模型；",
+                            "每个档位按<b>本地日</b>分别记「今天已用几次」，跨本地零点自动归零。")
                     .push("llm");
             llmEnabled = b.comment("总开关。关闭后所有 AI 功能都不可用（/nowweather ask 会提示）。")
                     .define("enabled", false);
-            llmApiKey = b.comment("API Key。留空则用 /nowweather config set 再填。")
+            llmApiKey = b.comment("主模型 API Key。留空则用 /nowweather config set 再填。")
                     .define("apiKey", "");
-            llmEndpoint = b.comment("接口地址（OpenAI 兼容的 /chat/completions）。")
+            llmEndpoint = b.comment("主模型接口地址（OpenAI 兼容的 /chat/completions）。",
+                            "★ 只有地址里含 deepseek 的端点才会收到 DeepSeek 专有的 thinking 字段；",
+                            "  Ollama / vLLM / LM Studio / OneAPI 等端点收到它可能直接返回 400，所以不发给它们。")
                     .define("endpoint", "https://api.deepseek.com/chat/completions");
-            llmModel = b.comment("模型名。").define("model", "deepseek-v4-flash");
-            llmThinking = b.comment("是否开启模型的思考模式（会显著增加输出 token = 成本，默认关）。")
+            llmModel = b.comment("主模型名。").define("model", "deepseek-v4-flash");
+            llmThinking = b.comment("是否开启主模型的思考模式（会显著增加输出 token = 成本，默认关）。")
                     .define("thinking", false);
-            llmMaxTokens = b.comment("单次输出上限（token）。")
+            llmMaxTokens = b.comment("主模型单次输出上限（token）。")
                     .defineInRange("maxTokens", 1200, 64, 8192);
-            llmWeatherDaily = b.comment("允许每天用 AI 辅助推算一次天气（省成本的硬上限）。")
+            llmTemperature = b.comment("主模型温度（0.0~2.0，默认 0.2）。",
+                            "天气推算与配置改写都要求「照格式老实输出」，所以默认很低；",
+                            "调高会更发散、更容易编造数值，一般不需要动。")
+                    .defineInRange("temperature", 0.2D, 0.0D, 2.0D);
+            llmTimeoutSeconds = b.comment("主模型单次请求超时（秒，3~300，默认 30）。",
+                            "以前这个值是写死 30 秒的常量，慢模型（本地大模型、冷启动、思考模式）",
+                            "经常在 30 秒整被掐断，日志里只留一句「请求超时」。现在可以按端点调。")
+                    .defineInRange("timeoutSeconds", 30, 3, 300);
+            llmDailyCalls = b.comment("主模型每天最多调用几次（1~100，默认 1）。",
+                            "只约束 /nowweather forecast ai；/nowweather config ask 不占用配额。",
+                            "按<b>本地日</b>重置（用所在地时区算的日界，不是「距上次 24 小时」）。")
+                    .defineInRange("dailyCalls", 1, 1, 100);
+            llmWeatherDaily = b.comment("是否启用 AI 辅助天气（总开关）。",
+                            "关掉之后 /nowweather forecast ai 直接不可用；",
+                            "真正限制「一天能问几次」的是上面每个档位的 dailyCalls。")
                     .define("weatherDaily", true);
             llmAllowConfigEdits = b.comment("允许 /nowweather ask 通过自然语言改配置。",
                             "只能改白名单内、且通过同一套范围校验的配置项。")
                     .define("allowConfigEdits", true);
+
+            // 副模型子段：[llm.secondary]。
+            // 注意 b.comment(...) 只作用于紧随其后的那一个 push/define，所以这里先 comment 再 push。
+            b.comment("副模型：主模型不可用（未配置 / 配额用完 / 调用失败）时自动回落的一档。",
+                            "用它来兜底最典型的两种场景 —— 主模型的每日配额用完了，或者主端点宕了。",
+                            "endpoint / model 留空表示「沿用主模型的那一项」，所以只填一个 Key 就能用；",
+                            "每日调用次数（dailyCalls）与主模型分开算。")
+                    .push("secondary");
+            llmSecondaryEnabled = b.comment("启用副模型。关闭时主模型失败就直接报错，不会再有第二次尝试。")
+                    .define("enabled", false);
+            llmSecondaryApiKey = b.comment("副模型 API Key。留空 = 未配置（这一档会被整体跳过）。")
+                    .define("apiKey", "");
+            llmSecondaryEndpoint = b.comment("副模型接口地址。留空 = 沿用主模型的 endpoint。")
+                    .define("endpoint", "");
+            llmSecondaryModel = b.comment("副模型名。留空 = 沿用主模型的 model。",
+                            "例：本地 Ollama 填 qwen2.5:7b，OpenRouter 填 meta-llama/llama-3.1-8b-instruct。")
+                    .define("model", "");
+            llmSecondaryThinking = b.comment("是否开启副模型的思考模式（会显著增加输出 token = 成本）。")
+                    .define("thinking", false);
+            llmSecondaryMaxTokens = b.comment("副模型单次输出上限（token）。")
+                    .defineInRange("maxTokens", 1200, 64, 8192);
+            llmSecondaryTemperature = b.comment("副模型温度（0.0~2.0，默认 0.2）。")
+                    .defineInRange("temperature", 0.2D, 0.0D, 2.0D);
+            llmSecondaryTimeoutSeconds = b.comment("副模型单次请求超时（秒，3~300，默认 30）。",
+                            "本地部署的小模型往往比云端慢，回落到这一档时可以把超时调大一些。")
+                    .defineInRange("timeoutSeconds", 30, 3, 300);
+            llmSecondaryDailyCalls = b.comment("副模型每天最多调用几次（1~100，默认 2）。",
+                            "★ 只统计<b>副模型真的被调用</b>的次数：主模型成功时副模型一次都不算。",
+                            "默认给 2 次，是因为它本来就是「主模型偶尔不可用」时的兜底。")
+                    .defineInRange("dailyCalls", 2, 1, 100);
+            b.pop();
             b.pop();
 
             b.comment("调试").push("debug");

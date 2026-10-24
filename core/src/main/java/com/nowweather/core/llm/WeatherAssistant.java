@@ -16,7 +16,8 @@ import java.util.Locale;
  *
  * <ol>
  *   <li><b>AI 辅助推算天气</b>（{@link #deriveWeather}）：有网络时，用「本地算法的推算结果 + AI 的经验修正」
- *       得到一份更合理的天气。这部分<b>每天最多调用一次</b>（见 {@link #DAILY_BUDGET_MILLIS}），
+ *       得到一份更合理的天气。成本由「每个档位每天 N 次」的配额兜住
+ *       （见 {@link DailyCallQuota}，旧的 {@link #DAILY_BUDGET_MILLIS} 已被它取代），
  *       结果写进缓存当天的剩余时间都用它 —— 这是为了省成本，也是因为天气本来就不会每小时剧变。</li>
  *   <li><b>自然语言改配置</b>（{@link #parseIntent}）：{@code /nowweather ask 帮我调整下api...}，
  *       模型只被允许返回一份<b>白名单内的键值对</b>，最终由平台层用与配置界面完全相同的
@@ -31,7 +32,14 @@ import java.util.Locale;
  */
 public final class WeatherAssistant {
 
-    /** 两次「AI 辅助天气」之间的最小间隔：24 小时。 */
+    /**
+     * 两次「AI 辅助天气」之间的最小间隔：24 小时。
+     *
+     * @deprecated 旧的「距上次 24 小时」预算常量，已被 {@link DailyCallQuota}
+     *             （每档每天 N 次、按本地日重置）取代，仅 {@link #budgetAvailable} /
+     *             {@link #budgetRemainingMillis} 这两个同样废弃的方法还在引用它。
+     */
+    @Deprecated
     public static final long DAILY_BUDGET_MILLIS = 24L * 60L * 60L * 1000L;
 
     private static final String WEATHER_SYSTEM_PROMPT = """
@@ -93,6 +101,16 @@ public final class WeatherAssistant {
     }
 
     /**
+     * 一次 AI 推算：既给解析结果，也保留<b>原始的 {@link LlmClient.Reply}</b>。
+     *
+     * <p>为什么两样都要：回落链（{@link LlmTiers}）判断「这一档成不成功」的依据是
+     * 传输层这次的成败，而不是解析出来的天气字段是否齐全 —— 模型可能好好地回了话、
+     * 只是没给出温度，那种情况不该再花钱去问副模型。</p>
+     */
+    public record WeatherAttempt(LlmClient.Reply reply, WeatherSuggestion suggestion) {
+    }
+
+    /**
      * 用 AI 修正本地推算出的天气。
      *
      * @param localSummary     本地算法的推算摘要（人话，直接喂给模型）
@@ -100,8 +118,18 @@ public final class WeatherAssistant {
      */
     public WeatherSuggestion deriveWeather(LlmClient.Options options, String localSummary,
                                            String contextSummary) {
+        return deriveWeatherAttempt(options, localSummary, contextSummary).suggestion();
+    }
+
+    /** 同 {@link #deriveWeather}，但把原始回复一并带出来（回落链需要它）。 */
+    public WeatherAttempt deriveWeatherAttempt(LlmClient.Options options, String localSummary,
+                                               String contextSummary) {
         String user = "地点与气候：\n" + contextSummary + "\n\n本地算法推算：\n" + localSummary;
         LlmClient.Reply reply = client.chat(options, WEATHER_SYSTEM_PROMPT, user);
+        return new WeatherAttempt(reply, parseWeatherReply(reply));
+    }
+
+    private static WeatherSuggestion parseWeatherReply(LlmClient.Reply reply) {
         if (!reply.hasContent()) {
             return WeatherSuggestion.failure(reply.error());
         }
@@ -128,7 +156,15 @@ public final class WeatherAssistant {
         }
     }
 
-    /** 是否已超过每日预算。 */
+    /**
+     * 是否已超过每日预算。
+     *
+     * @deprecated 已被 {@link DailyCallQuota} 的「每个档位每天 N 次、按本地日重置」取代。
+     *             保留它只是因为旧测试与可能的第三方调用点还在用；新代码不要再依赖
+     *             「距上次 24 小时」这套语义 —— 它没法表达「今天还剩几次」，
+     *             也没法给主 / 副两个档位分别记账。
+     */
+    @Deprecated
     public static boolean budgetAvailable(long lastCallEpochMillis, long nowEpochMillis) {
         if (lastCallEpochMillis <= 0L) {
             return true;
@@ -136,7 +172,12 @@ public final class WeatherAssistant {
         return nowEpochMillis - lastCallEpochMillis >= DAILY_BUDGET_MILLIS;
     }
 
-    /** 距离下次可用还有多少毫秒（可用时返回 0）。 */
+    /**
+     * 距离下次可用还有多少毫秒（可用时返回 0）。
+     *
+     * @deprecated 同 {@link #budgetAvailable(long, long)}：被 {@link DailyCallQuota} 取代。
+     */
+    @Deprecated
     public static long budgetRemainingMillis(long lastCallEpochMillis, long nowEpochMillis) {
         if (lastCallEpochMillis <= 0L) {
             return 0L;
@@ -172,6 +213,15 @@ public final class WeatherAssistant {
     }
 
     /**
+     * 一次「自然语言改配置」尝试：解析结果 + 原始回复。
+     *
+     * <p>和 {@link WeatherAttempt} 同一个理由：回落链要知道「这一次请求本身」的成败，
+     * 而不是「模型有没有给出可用的改动能」。</p>
+     */
+    public record IntentAttempt(LlmClient.Reply reply, ConfigPatch patch) {
+    }
+
+    /**
      * 带「当前配置快照」的版本：模型因此能回答「我现在刷新间隔是多少」这类问题，
      * 也能基于现状给出更合理的修改建议，而不是凭空猜。
      *
@@ -179,17 +229,27 @@ public final class WeatherAssistant {
      */
     public ConfigPatch parseIntent(LlmClient.Options options, String userText,
                                    List<String> allowedKeys, String currentConfig) {
+        return parseIntentAttempt(options, userText, allowedKeys, currentConfig).patch();
+    }
+
+    /** 同 {@link #parseIntent}，但把原始回复一并带出来（回落链需要它）。 */
+    public IntentAttempt parseIntentAttempt(LlmClient.Options options, String userText,
+                                            List<String> allowedKeys, String currentConfig) {
         if (userText == null || userText.isBlank()) {
-            return ConfigPatch.failure("请输入你想调整的内容");
+            return new IntentAttempt(null, ConfigPatch.failure("请输入你想调整的内容"));
         }
         if (allowedKeys == null || allowedKeys.isEmpty()) {
-            return ConfigPatch.failure("当前没有可修改的配置项");
+            return new IntentAttempt(null, ConfigPatch.failure("当前没有可修改的配置项"));
         }
         String system = INTENT_SYSTEM_PROMPT.replace("%s", String.join("\n", allowedKeys));
         String user = (currentConfig == null || currentConfig.isBlank())
                 ? userText
                 : "当前配置（节选，密钥已打码）：\n" + currentConfig + "\n\n用户请求：" + userText;
         LlmClient.Reply reply = client.chat(options, system, user);
+        return new IntentAttempt(reply, parseIntentReply(reply, allowedKeys));
+    }
+
+    private ConfigPatch parseIntentReply(LlmClient.Reply reply, List<String> allowedKeys) {
         if (!reply.hasContent()) {
             return ConfigPatch.failure(reply.error());
         }

@@ -14,6 +14,7 @@ import com.nowweather.core.log.SyncLogger;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * 极简 LLM 客户端（OpenAI 兼容的 {@code /chat/completions}）。
@@ -26,7 +27,8 @@ import java.util.List;
  * <ul>
  *   <li>调用次数由 {@link WeatherAssistant} 的「每天一次」预算兜住，本类只负责发请求；</li>
  *   <li>{@code maxTokens} 有上限（默认 {@link #DEFAULT_MAX_TOKENS}），防止模型失控长篇大论；</li>
- *   <li>请求体里的 {@code thinking} 默认关闭（DeepSeek 的思考模式会显著增加输出 token）。</li>
+ *   <li>请求体里的 {@code thinking} 默认关闭（DeepSeek 的思考模式会显著增加输出 token）；
+ *       但这个字段<b>只发给 DeepSeek</b>，见 {@link #supportsThinkingField(String)}。</li>
  * </ul>
  *
  * <h2>安全</h2>
@@ -136,9 +138,9 @@ public final class LlmClient {
         body.put("stream", false);
         body.put("temperature", options.temperature());
         body.put("max_tokens", options.maxTokens());
-        if (!options.thinking()) {
-            // DeepSeek 的思考模式会显著增加输出 token（= 成本）。关闭方式随版本略有差异，
-            // 这里同时给两种写法，服务端不认识的那一个会被忽略。
+        if (!options.thinking() && supportsThinkingField(options.endpoint())) {
+            // DeepSeek 的思考模式会显著增加输出 token（= 成本），而关闭方式只有它认识。
+            // 其余兼容服务端不认这个字段（有的直接 400），所以只在 DeepSeek 端点才发。
             JsonObject thinking = new JsonObject();
             thinking.put("type", "disabled");
             body.put("thinking", (JsonValue) thinking);
@@ -192,6 +194,26 @@ public final class LlmClient {
         } catch (JsonException e) {
             return new Reply(false, "", "响应解析失败：" + e.getMessage(), 0, 0, elapsed);
         }
+    }
+
+    /**
+     * 这个端点认不认识 {@code thinking} 字段。
+     *
+     * <p><b>为什么必须判定而不是一律发</b>：{@code thinking: {"type": "disabled"}} 是
+     * <b>DeepSeek 专有</b>的请求字段，OpenAI 的官方协议里没有它。其它「OpenAI 兼容」服务端
+     * （Ollama / vLLM / LM Studio / OneAPI / OpenRouter 的某些上游）对未知顶层字段的容忍度并不一致：
+     * 宽容的实现会静默忽略，严格的实现直接返回 400 {@code unrecognized field "thinking"}。
+     * 之前本客户端无条件附带该字段，于是把端点换成上面任何一个都会莫名其妙地「请求失败」——
+     * 而错误信息里只有一个 400，根本看不出是这里的锅。</p>
+     *
+     * <p>判定方式刻意选「看 URL 里有没有 {@code deepseek}」（忽略大小写）：
+     * 这是唯一一处既能覆盖官方域名 {@code api.deepseek.com}、又能覆盖自建反代
+     * （例如 {@code https://llm.example.com/deepseek/v1/chat/completions}）的可靠信号，
+     * 而且不依赖任何需要额外配置的东西。代价是：把反代路径里的 deepseek 去掉后会退化成「不发」，
+     * 而「不发」只是省不了思考 token，不会让请求失败 —— 失败方向的退化是安全的。</p>
+     */
+    public static boolean supportsThinkingField(String endpoint) {
+        return endpoint != null && endpoint.toLowerCase(Locale.ROOT).contains("deepseek");
     }
 
     /** 便捷方法：单条 system + 单条 user。 */

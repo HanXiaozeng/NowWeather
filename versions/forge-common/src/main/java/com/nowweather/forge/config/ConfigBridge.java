@@ -139,12 +139,71 @@ public final class ConfigBridge {
         return json;
     }
 
-    /** LLM 配置（供命令层构造客户端）。 */
-    public static com.nowweather.core.llm.LlmClient.Options llmOptions() {
+    // ------------------------------------------------------------------ LLM
+
+    /**
+     * 主模型的调用参数。
+     *
+     * <p>与旧版一致：沿用 {@code llm.apiKey / llm.endpoint / llm.model} 这几个键，
+     * 只是把原先写死的温度（0.2）与超时（30 秒）改成了配置值。</p>
+     */
+    public static com.nowweather.core.llm.LlmClient.Options llmPrimaryOptions() {
         ForgeConfig.Common c = ForgeConfig.COMMON;
         return new com.nowweather.core.llm.LlmClient.Options(
-                c.llmEndpoint.get(), c.llmApiKey.get(), c.llmModel.get(), 0.2D,
-                c.llmMaxTokens.get(), c.llmThinking.get(), 30_000L);
+                c.llmEndpoint.get(), c.llmApiKey.get(), c.llmModel.get(), c.llmTemperature.get(),
+                c.llmMaxTokens.get(), c.llmThinking.get(),
+                c.llmTimeoutSeconds.get() * 1000L);
+    }
+
+    /**
+     * 副模型的调用参数。
+     *
+     * <p>端点 / 模型名留空时<b>沿用主模型的那一项</b>：这样「同一家服务商、换一个更便宜的模型」
+     * 只要填 Key + 模型名，而「完全独立的第二个服务商」照常三项都填即可。
+     * 反过来（只填 Key、端点模型都空）会退化成「主模型的复制品」，此时
+     * {@code LlmTiers.Tier#configured()} 仍然为 true —— 这是有意义的：
+     * 同一个账号换一个 Key 的额度池也算一种回落手段。</p>
+     */
+    public static com.nowweather.core.llm.LlmClient.Options llmSecondaryOptions() {
+        ForgeConfig.Common c = ForgeConfig.COMMON;
+        String endpoint = blankTo(c.llmSecondaryEndpoint.get(), c.llmEndpoint.get());
+        String model = blankTo(c.llmSecondaryModel.get(), c.llmModel.get());
+        return new com.nowweather.core.llm.LlmClient.Options(
+                endpoint, c.llmSecondaryApiKey.get(), model, c.llmSecondaryTemperature.get(),
+                c.llmSecondaryMaxTokens.get(), c.llmSecondaryThinking.get(),
+                c.llmSecondaryTimeoutSeconds.get() * 1000L);
+    }
+
+    /** 主档位（含每日配额）。 */
+    public static com.nowweather.core.llm.LlmTiers.Tier llmPrimaryTier() {
+        return com.nowweather.core.llm.LlmTiers.Tier.primary(
+                llmPrimaryOptions(), ForgeConfig.COMMON.llmDailyCalls.get());
+    }
+
+    /** 副档位（含每日配额；未启用时 enabled = false，回落链会跳过它）。 */
+    public static com.nowweather.core.llm.LlmTiers.Tier llmSecondaryTier() {
+        return com.nowweather.core.llm.LlmTiers.Tier.secondary(
+                ForgeConfig.COMMON.llmSecondaryEnabled.get(), llmSecondaryOptions(),
+                ForgeConfig.COMMON.llmSecondaryDailyCalls.get());
+    }
+
+    public static boolean llmSecondaryEnabled() {
+        return ForgeConfig.COMMON.llmSecondaryEnabled.get();
+    }
+
+    private static String blankTo(String value, String fallback) {
+        return value == null || value.isBlank() ? fallback : value;
+    }
+
+    /**
+     * 主模型参数（旧入口，保留给还没改过来的调用点）。
+     *
+     * @deprecated 用 {@link #llmPrimaryOptions()} / {@link #llmPrimaryTier()}：
+     *             现在有主副两档，叫 {@code llmOptions()} 已经说不清是谁的参数了。
+     */
+    @Deprecated
+    public static com.nowweather.core.llm.LlmClient.Options llmOptions() {
+        return llmPrimaryOptions();
     }
 
     /**
